@@ -1,7 +1,8 @@
 import React, { useMemo, useState } from "react";
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { Button } from "../components/ui";
 import { useTheme } from "../theme/ThemeProvider";
+import { useAuth } from "../auth/AuthContext";
 
 function NavIcon({ name }) {
   // Simple inline “icon” using initials; avoids adding icon deps.
@@ -21,6 +22,8 @@ const navItems = [
 export default function AdminLayout() {
   /** This is a public component providing the app shell (sidebar/topbar). */
   const { mode, toggle } = useTheme();
+  const auth = useAuth();
+  const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const closeMobile = () => setMobileOpen(false);
@@ -73,11 +76,28 @@ export default function AdminLayout() {
           </div>
 
           <div className="ds-topbar__actions">
+            <div className="ds-muted" style={{ fontSize: 12, textAlign: "right" }}>
+              <div style={{ fontWeight: 800 }}>{auth.user?.name || auth.user?.email || "User"}</div>
+              <div>{auth.roles?.length ? auth.roles.join(", ") : "—"}</div>
+            </div>
+
             <Button variant="ghost" onClick={toggle} aria-label="Toggle theme">
               {mode === "light" ? "Dark" : "Light"} mode
             </Button>
-            <div className="ds-avatar" title="Admin">
-              A
+
+            <Button
+              variant="ghost"
+              onClick={() => {
+                auth.logout();
+                navigate("/login", { replace: true });
+              }}
+              aria-label="Logout"
+            >
+              Logout
+            </Button>
+
+            <div className="ds-avatar" title={auth.user?.email || "Admin"}>
+              {(auth.user?.email || "A").slice(0, 1).toUpperCase()}
             </div>
           </div>
         </header>

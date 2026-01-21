@@ -50,18 +50,22 @@ function endpoint(path) {
 }
 
 /**
- * Placeholder network request (unused by default).
+ * Token-aware network request helper.
  * @param {string} method
  * @param {string} path
  * @param {any=} body
+ * @param {string=} token
  * @returns {Promise<ApiResult>}
  */
-async function request(method, path, body) {
+async function request(method, path, body, token) {
   try {
     const url = endpoint(path);
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+
     const res = await fetch(url, {
       method,
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: body == null ? undefined : JSON.stringify(body),
     });
 
@@ -122,8 +126,16 @@ const fakeDb = {
 
 /**
  * Stub toggles: keep false for now to avoid assuming a backend exists.
+ * Auth is special: it will attempt network login when `useNetwork` is true, but can fall back to stubs.
  */
 const useNetwork = false;
+
+function demoAuth() {
+  return ok({
+    accessToken: "demo-token",
+    user: { id: "usr_demo", email: "admin@demo.local", name: "Demo Admin", roles: ["admin"] },
+  });
+}
 
 // PUBLIC_INTERFACE
 export function createApiClient() {
@@ -137,6 +149,59 @@ export function createApiClient() {
       documents: () => endpoint("/documents"),
       transactions: () => endpoint("/finance/transactions"),
       activity: () => endpoint("/activity"),
+      login: () => endpoint("/auth/login"),
+      me: () => endpoint("/auth/me"),
+    },
+
+    auth: {
+      /**
+       * Login with email/password.
+       * In stub mode, always succeeds with a demo admin user.
+       * In network mode, attempts POST /auth/login and falls back to demo user if backend is unavailable.
+       * @param {{email: string, password: string}} payload
+       * @returns {Promise<ApiResult>}
+       */
+      async login(payload) {
+        const { useStubs } = getRuntimeConfig();
+        if (useStubs) {
+          await delay(DEFAULT_DELAY_MS);
+          return demoAuth();
+        }
+
+        if (useNetwork) {
+          const res = await request("POST", "/auth/login", payload);
+          if (res.ok) return res;
+          // Keep the UI usable if auth endpoint isn't up yet.
+          return demoAuth();
+        }
+
+        await delay(DEFAULT_DELAY_MS);
+        return demoAuth();
+      },
+
+      /**
+       * Fetch current user profile for an existing session.
+       * In stub mode returns demo profile.
+       * In network mode calls GET /auth/me and falls back to demo profile if backend is unavailable.
+       * @param {string} token
+       * @returns {Promise<ApiResult>}
+       */
+      async me(token) {
+        const { useStubs } = getRuntimeConfig();
+        if (useStubs) {
+          await delay(DEFAULT_DELAY_MS);
+          return ok({ id: "usr_demo", email: "admin@demo.local", name: "Demo Admin", roles: ["admin"] });
+        }
+
+        if (useNetwork) {
+          const res = await request("GET", "/auth/me", undefined, token);
+          if (res.ok) return res;
+          return ok({ id: "usr_demo", email: "admin@demo.local", name: "Demo Admin", roles: ["admin"] });
+        }
+
+        await delay(DEFAULT_DELAY_MS);
+        return ok({ id: "usr_demo", email: "admin@demo.local", name: "Demo Admin", roles: ["admin"] });
+      },
     },
 
     dashboard: {
@@ -272,4 +337,3 @@ export function createApiClient() {
     },
   };
 }
-

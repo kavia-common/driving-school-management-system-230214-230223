@@ -56,6 +56,10 @@ export function getRuntimeConfig() {
     trustProxy: parseBool(process.env.REACT_APP_TRUST_PROXY, false),
     telemetryDisabled: parseBool(process.env.REACT_APP_NEXT_TELEMETRY_DISABLED, true),
     port: process.env.REACT_APP_PORT || "3000",
+
+    // When true, the app uses stubbed auth regardless of backend availability.
+    // This keeps the template usable without a backend.
+    useStubs: parseBool(process.env.REACT_APP_USE_STUBS, false),
   };
 }
 
