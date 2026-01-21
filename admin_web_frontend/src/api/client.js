@@ -122,7 +122,6 @@ function buildQuery(params = {}) {
 function normalizeError(res, body, err) {
   if (res) {
     const status = res.status;
-    // Try common API error shapes
     const message =
       body?.message ||
       body?.error ||
@@ -160,7 +159,7 @@ function createHttpClient(options = {}) {
       ...(options2.headers || {}),
     };
 
-    // Attach JSON header only when body exists; supports FormData later.
+    // Attach JSON header only when body exists; supports FormData.
     const hasBody = options2.body !== undefined && options2.body !== null;
     const isFormData = typeof FormData !== "undefined" && options2.body instanceof FormData;
     if (hasBody && !isFormData) headers["Content-Type"] = "application/json";
@@ -183,7 +182,7 @@ function createHttpClient(options = {}) {
         try {
           onUnauthorized(info);
         } catch {
-          // Do not break the original request flow if callback throws.
+          // ignore
         }
       }
 
@@ -404,7 +403,6 @@ function createStubModules() {
           rows = rows.filter((i) => String(i.status) === status);
         }
 
-        // Sort newest first (roughly by createdAt when present)
         rows.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
 
         const total = rows.length;
@@ -488,7 +486,6 @@ function createStubModules() {
         if (!list.includes(String(studentId))) list.push(String(studentId));
         fakeDb.instructorStudents[key] = list;
 
-        // Keep a simple derived status for UI
         inst.status = list.length > 0 ? "Assigned" : "Available";
 
         fakeDb.activity.unshift({
@@ -552,7 +549,6 @@ function createStubModules() {
           else if (status === "Disabled") rows = rows.filter((s) => !Boolean(s.active));
         }
 
-        // Sort newest-ish first (string compare id as stable fallback)
         rows.sort((a, b) => String(b.id || "").localeCompare(String(a.id || "")));
 
         const total = rows.length;
@@ -597,20 +593,121 @@ function createStubModules() {
     },
 
     documents: {
-      async list() {
+      /**
+       * List documents (stubbed): supports studentId, status, type, search, pagination.
+       * Returns { items, page, pageSize, total }.
+       */
+      async list(params = {}) {
         await delay(DEFAULT_DELAY_MS);
-        return ok([...fakeDb.documents]);
+
+        const page = Number(params.page) > 0 ? Number(params.page) : 1;
+        const pageSize = Number(params.pageSize) > 0 ? Number(params.pageSize) : 10;
+
+        const studentId = String(params.studentId || "").trim();
+        const status = String(params.status || "").trim();
+        const type = String(params.type || "").trim();
+        const search = String(params.search || params.q || "").trim().toLowerCase();
+
+        let rows = [...fakeDb.documents];
+
+        if (studentId) rows = rows.filter((d) => String(d.studentId) === studentId);
+        if (status && status !== "All") rows = rows.filter((d) => String(d.status) === status);
+        if (type && type !== "All") rows = rows.filter((d) => String(d.type) === type);
+
+        if (search) {
+          rows = rows.filter((d) => {
+            const hay = `${d.studentId || ""} ${d.type || ""} ${d.status || ""} ${d.name || ""}`.toLowerCase();
+            return hay.includes(search);
+          });
+        }
+
+        rows.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+
+        const total = rows.length;
+        const start = (page - 1) * pageSize;
+        const items = rows.slice(start, start + pageSize);
+
+        return ok({ items, page, pageSize, total });
       },
-      async updateStatus(id, status) {
+
+      async get(id) {
+        await delay(DEFAULT_DELAY_MS);
+        const found = fakeDb.documents.find((d) => d.id === id);
+        return found ? ok({ ...found }) : fail("Document not found", 404);
+      },
+
+      /**
+       * Create a document record (stubbed upload).
+       * Accepts: { studentId, type, name, status, fileName }
+       */
+      async create(payload = {}) {
+        await delay(DEFAULT_DELAY_MS);
+
+        const studentId = String(payload.studentId || "").trim();
+        const type = String(payload.type || "").trim();
+        const name = String(payload.name || payload.fileName || "").trim();
+
+        if (!studentId) return fail("studentId is required", 400);
+        if (!type) return fail("type is required", 400);
+        if (!name) return fail("name (or fileName) is required", 400);
+
+        const created = {
+          id: `doc_${String(Math.random()).slice(2, 6)}`,
+          studentId,
+          type,
+          name,
+          status: payload.status || "Received",
+          updatedAt: new Date().toISOString().slice(0, 10),
+        };
+
+        fakeDb.documents.unshift(created);
+
+        fakeDb.activity.unshift({
+          id: `act_${String(Math.random()).slice(2, 6)}`,
+          at: new Date().toISOString().replace("T", " ").slice(0, 16),
+          label: `Document "${created.type}" added for ${created.studentId}`,
+          meta: "Documents",
+        });
+
+        return ok(created, 201);
+      },
+
+      /** Update document fields (stubbed). */
+      async update(id, payload = {}) {
         await delay(DEFAULT_DELAY_MS);
         const idx = fakeDb.documents.findIndex((d) => d.id === id);
         if (idx === -1) return fail("Document not found", 404);
+
         fakeDb.documents[idx] = {
           ...fakeDb.documents[idx],
-          status,
+          ...payload,
           updatedAt: new Date().toISOString().slice(0, 10),
         };
+
         return ok({ ...fakeDb.documents[idx] });
+      },
+
+      async remove(id) {
+        await delay(DEFAULT_DELAY_MS);
+        const idx = fakeDb.documents.findIndex((d) => d.id === id);
+        if (idx === -1) return fail("Document not found", 404);
+
+        const removed = fakeDb.documents[idx];
+        fakeDb.documents.splice(idx, 1);
+
+        fakeDb.activity.unshift({
+          id: `act_${String(Math.random()).slice(2, 6)}`,
+          at: new Date().toISOString().replace("T", " ").slice(0, 16),
+          label: `Document "${removed.type}" deleted for ${removed.studentId}`,
+          meta: "Documents",
+        });
+
+        return ok({ id }, 200, "Deleted");
+      },
+
+      // Backward compatible: older page uses updateStatus()
+      async updateStatus(id, status) {
+        return this.update(id, { status });
       },
     },
 
@@ -643,15 +740,12 @@ function createNetworkModules(http) {
   return {
     dashboard: {
       async getSummary(params) {
-        // Optional params for future pagination/filters
         return http.get("/dashboard/summary", params);
       },
     },
 
     students: {
       async list(params) {
-        // Prefer explicit params: { page, pageSize, search, status }
-        // (passes through buildQuery which supports both standard + extra keys)
         return http.get("/students", params);
       },
       async get(id) {
@@ -685,7 +779,6 @@ function createNetworkModules(http) {
         return http.del(`/instructors/${encodeURIComponent(String(id))}`);
       },
 
-      // Assignment endpoints (best-guess REST names; stub mode still works if backend differs)
       async listAssignedStudents(instructorId) {
         return http.get(`/instructors/${encodeURIComponent(String(instructorId))}/students`);
       },
@@ -724,6 +817,41 @@ function createNetworkModules(http) {
       async list(params) {
         return http.get("/documents", params);
       },
+      async get(id) {
+        return http.get(`/documents/${encodeURIComponent(String(id))}`);
+      },
+
+      /**
+       * Create document:
+       * - If payload.file is provided (File), sends multipart/form-data.
+       * - Otherwise sends JSON payload.
+       */
+      async create(payload = {}) {
+        const hasFile = typeof File !== "undefined" && payload?.file instanceof File;
+
+        if (hasFile) {
+          const fd = new FormData();
+          if (payload.studentId != null) fd.append("studentId", String(payload.studentId));
+          if (payload.type != null) fd.append("type", String(payload.type));
+          if (payload.name != null) fd.append("name", String(payload.name));
+          if (payload.status != null) fd.append("status", String(payload.status));
+          fd.append("file", payload.file);
+
+          return http.request("POST", "/documents", { body: fd });
+        }
+
+        return http.post("/documents", payload);
+      },
+
+      async update(id, payload) {
+        return http.put(`/documents/${encodeURIComponent(String(id))}`, payload);
+      },
+
+      async remove(id) {
+        return http.del(`/documents/${encodeURIComponent(String(id))}`);
+      },
+
+      // Backward compatible
       async updateStatus(id, status) {
         return http.put(`/documents/${encodeURIComponent(String(id))}`, { status });
       },
@@ -758,7 +886,6 @@ export function createApiClient(options = {}) {
     onUnauthorized:
       options.onUnauthorized ||
       (() => {
-        // Default behavior: clear stored token so AuthContext bootstrapping will reset.
         try {
           window.localStorage.removeItem(TOKEN_STORAGE_KEY);
         } catch {
@@ -768,18 +895,12 @@ export function createApiClient(options = {}) {
   });
 
   const network = createNetworkModules(http);
-
-  // Highest precedence: explicit disable network => force stubs.
-  // If network enabled but stubs enabled, we still use stub auth (keeps login usable),
-  // while allowing other modules to use network.
   const useNetwork = Boolean(cfg.useNetwork);
 
   return {
-    // keep existing behavior/exports
     config: getRuntimeConfig,
     buildQuery,
 
-    // Backward-compatible endpoints helper (still useful for debug)
     endpoints: {
       students: () => endpoint("/students"),
       instructors: () => endpoint("/instructors"),
@@ -791,7 +912,6 @@ export function createApiClient(options = {}) {
       me: () => endpoint("/auth/me"),
     },
 
-    // Modules: route based on env
     dashboard: {
       async getSummary(params) {
         if (!useNetwork) return stubs.dashboard.getSummary(params);
@@ -808,7 +928,6 @@ export function createApiClient(options = {}) {
         if (!useNetwork) return stubs.students.get(id);
         return network.students.get(id);
       },
-      // Backward compatible alias (some pages may still call getById)
       async getById(id) {
         if (!useNetwork) return stubs.students.get(id);
         return network.students.get(id);
@@ -862,12 +981,8 @@ export function createApiClient(options = {}) {
         return network.instructors.unassignStudent(payload);
       },
 
-      // Backward compatible (older pages/flows)
       async assign(payload) {
-        if (!useNetwork) {
-          // Map to new stub name
-          return stubs.instructors.assignStudent(payload);
-        }
+        if (!useNetwork) return stubs.instructors.assignStudent(payload);
         return network.instructors.assign(payload);
       },
     },
@@ -900,6 +1015,22 @@ export function createApiClient(options = {}) {
         if (!useNetwork) return stubs.documents.list(params);
         return network.documents.list(params);
       },
+      async get(id) {
+        if (!useNetwork) return stubs.documents.get(id);
+        return network.documents.get(id);
+      },
+      async create(payload) {
+        if (!useNetwork) return stubs.documents.create(payload);
+        return network.documents.create(payload);
+      },
+      async update(id, payload) {
+        if (!useNetwork) return stubs.documents.update(id, payload);
+        return network.documents.update(id, payload);
+      },
+      async remove(id) {
+        if (!useNetwork) return stubs.documents.remove(id);
+        return network.documents.remove(id);
+      },
       async updateStatus(id, status) {
         if (!useNetwork) return stubs.documents.updateStatus(id, status);
         return network.documents.updateStatus(id, status);
@@ -915,12 +1046,10 @@ export function createApiClient(options = {}) {
 
     auth: {
       async login(payload) {
-        // Auth can be forced to stub via useStubs, regardless of network switch.
         if (cfg.useStubs) return stubs.auth.login(payload);
         if (!useNetwork) return stubs.auth.login(payload);
 
         const res = await network.auth.login(payload);
-        // Keep app usable even if backend auth isn't up yet.
         if (!res.ok) return demoAuthResponse();
         return res;
       },
@@ -930,7 +1059,6 @@ export function createApiClient(options = {}) {
         if (!useNetwork) return stubs.auth.me();
 
         const res = await network.auth.me();
-        // Keep UX stable if backend isn't ready.
         if (!res.ok) return stubs.auth.me();
         return res;
       },
