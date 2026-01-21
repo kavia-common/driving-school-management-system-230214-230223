@@ -15,6 +15,7 @@ import StudentForm from "./pages/StudentForm";
 import Instructors from "./pages/Instructors";
 import InstructorForm from "./pages/InstructorForm";
 import Services from "./pages/Services";
+import ServiceForm from "./pages/ServiceForm";
 import Documents from "./pages/Documents";
 import Finance from "./pages/Finance";
 import Login from "./pages/Login";
@@ -45,6 +46,8 @@ function App() {
                     <Route path="/instructors/new" element={<InstructorForm />} />
                     <Route path="/instructors/:id" element={<InstructorForm />} />
                     <Route path="/services" element={<Services />} />
+                    <Route path="/services/new" element={<ServiceForm />} />
+                    <Route path="/services/:id" element={<ServiceForm />} />
                   </Route>
 
                   {/* admin only */}

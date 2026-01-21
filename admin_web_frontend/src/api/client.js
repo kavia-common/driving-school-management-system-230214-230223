@@ -525,10 +525,49 @@ function createStubModules() {
     },
 
     services: {
-      async list() {
+      /**
+       * List services with stubbed server-like behavior:
+       * - supports { page, pageSize, search, status }
+       * - returns { items, page, pageSize, total }
+       */
+      async list(params = {}) {
         await delay(DEFAULT_DELAY_MS);
-        return ok([...fakeDb.services]);
+
+        const page = Number(params.page) > 0 ? Number(params.page) : 1;
+        const pageSize = Number(params.pageSize) > 0 ? Number(params.pageSize) : 10;
+        const search = String(params.search || "").trim().toLowerCase();
+        const status = String(params.status || "").trim();
+
+        let rows = [...fakeDb.services];
+
+        if (search) {
+          rows = rows.filter((s) => {
+            const hay = `${s.name || ""}`.toLowerCase();
+            return hay.includes(search);
+          });
+        }
+
+        if (status && status !== "All") {
+          if (status === "Active") rows = rows.filter((s) => Boolean(s.active));
+          else if (status === "Disabled") rows = rows.filter((s) => !Boolean(s.active));
+        }
+
+        // Sort newest-ish first (string compare id as stable fallback)
+        rows.sort((a, b) => String(b.id || "").localeCompare(String(a.id || "")));
+
+        const total = rows.length;
+        const start = (page - 1) * pageSize;
+        const items = rows.slice(start, start + pageSize);
+
+        return ok({ items, page, pageSize, total });
       },
+
+      async get(id) {
+        await delay(DEFAULT_DELAY_MS);
+        const found = fakeDb.services.find((s) => s.id === id);
+        return found ? ok({ ...found }) : fail("Service not found", 404);
+      },
+
       async update(id, payload) {
         await delay(DEFAULT_DELAY_MS);
         const idx = fakeDb.services.findIndex((s) => s.id === id);
@@ -536,11 +575,24 @@ function createStubModules() {
         fakeDb.services[idx] = { ...fakeDb.services[idx], ...payload };
         return ok({ ...fakeDb.services[idx] });
       },
+
       async create(payload) {
         await delay(DEFAULT_DELAY_MS);
-        const created = { id: `srv_${String(Math.random()).slice(2, 6)}`, active: true, ...payload };
+        const created = {
+          id: `srv_${String(Math.random()).slice(2, 6)}`,
+          active: payload.active ?? true,
+          ...payload,
+        };
         fakeDb.services.unshift(created);
         return ok(created, 201);
+      },
+
+      async remove(id) {
+        await delay(DEFAULT_DELAY_MS);
+        const idx = fakeDb.services.findIndex((s) => s.id === id);
+        if (idx === -1) return fail("Service not found", 404);
+        fakeDb.services.splice(idx, 1);
+        return ok({ id }, 200, "Deleted");
       },
     },
 
@@ -654,11 +706,17 @@ function createNetworkModules(http) {
       async list(params) {
         return http.get("/services", params);
       },
-      async update(id, payload) {
-        return http.put(`/services/${encodeURIComponent(String(id))}`, payload);
+      async get(id) {
+        return http.get(`/services/${encodeURIComponent(String(id))}`);
       },
       async create(payload) {
         return http.post("/services", payload);
+      },
+      async update(id, payload) {
+        return http.put(`/services/${encodeURIComponent(String(id))}`, payload);
+      },
+      async remove(id) {
+        return http.del(`/services/${encodeURIComponent(String(id))}`);
       },
     },
 
@@ -819,13 +877,21 @@ export function createApiClient(options = {}) {
         if (!useNetwork) return stubs.services.list(params);
         return network.services.list(params);
       },
-      async update(id, payload) {
-        if (!useNetwork) return stubs.services.update(id, payload);
-        return network.services.update(id, payload);
+      async get(id) {
+        if (!useNetwork) return stubs.services.get(id);
+        return network.services.get(id);
       },
       async create(payload) {
         if (!useNetwork) return stubs.services.create(payload);
         return network.services.create(payload);
+      },
+      async update(id, payload) {
+        if (!useNetwork) return stubs.services.update(id, payload);
+        return network.services.update(id, payload);
+      },
+      async remove(id) {
+        if (!useNetwork) return stubs.services.remove(id);
+        return network.services.remove(id);
       },
     },
 
