@@ -7,6 +7,7 @@ import AdminLayout from "./layout/AdminLayout";
 
 import { AuthProvider } from "./auth/AuthContext";
 import ProtectedRoute from "./auth/ProtectedRoute";
+import { ToastProvider } from "./components/ui";
 
 import Dashboard from "./pages/Dashboard";
 import StudentsList from "./pages/StudentsList";
@@ -24,36 +25,38 @@ function App() {
   return (
     <ThemeProvider>
       <AuthProvider>
-        <BrowserRouter>
-          <Routes>
-            <Route path="/login" element={<Login />} />
+        <ToastProvider>
+          <BrowserRouter>
+            <Routes>
+              <Route path="/login" element={<Login />} />
 
-            {/* Authenticated area */}
-            <Route element={<ProtectedRoute />}>
-              <Route element={<AdminLayout />}>
-                <Route path="/" element={<Dashboard />} />
-                <Route path="/students" element={<StudentsList />} />
-                <Route path="/students/new" element={<StudentForm />} />
-                <Route path="/students/:id" element={<StudentForm />} />
+              {/* Authenticated area */}
+              <Route element={<ProtectedRoute />}>
+                <Route element={<AdminLayout />}>
+                  <Route path="/" element={<Dashboard />} />
+                  <Route path="/students" element={<StudentsList />} />
+                  <Route path="/students/new" element={<StudentForm />} />
+                  <Route path="/students/:id" element={<StudentForm />} />
 
-                {/* manager OR admin */}
-                <Route element={<ProtectedRoute requiredRoles={["manager", "admin"]} />}>
-                  <Route path="/instructors" element={<Instructors />} />
-                  <Route path="/services" element={<Services />} />
-                </Route>
+                  {/* manager OR admin */}
+                  <Route element={<ProtectedRoute requiredRoles={["manager", "admin"]} />}>
+                    <Route path="/instructors" element={<Instructors />} />
+                    <Route path="/services" element={<Services />} />
+                  </Route>
 
-                {/* admin only */}
-                <Route element={<ProtectedRoute requiredRoles={["admin"]} />}>
-                  <Route path="/documents" element={<Documents />} />
-                  <Route path="/finance" element={<Finance />} />
+                  {/* admin only */}
+                  <Route element={<ProtectedRoute requiredRoles={["admin"]} />}>
+                    <Route path="/documents" element={<Documents />} />
+                    <Route path="/finance" element={<Finance />} />
+                  </Route>
                 </Route>
               </Route>
-            </Route>
 
-            <Route path="/dashboard" element={<Navigate to="/" replace />} />
-            <Route path="*" element={<NotFound />} />
-          </Routes>
-        </BrowserRouter>
+              <Route path="/dashboard" element={<Navigate to="/" replace />} />
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </BrowserRouter>
+        </ToastProvider>
       </AuthProvider>
     </ThemeProvider>
   );

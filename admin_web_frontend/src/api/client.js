@@ -283,15 +283,48 @@ function createStubModules() {
     },
 
     students: {
-      async list() {
+      /**
+       * List students with stubbed server-like behavior:
+       * - supports { page, pageSize, search, status }
+       * - returns { items, page, pageSize, total }
+       */
+      async list(params = {}) {
         await delay(DEFAULT_DELAY_MS);
-        return ok([...fakeDb.students]);
+
+        const page = Number(params.page) > 0 ? Number(params.page) : 1;
+        const pageSize = Number(params.pageSize) > 0 ? Number(params.pageSize) : 10;
+        const search = String(params.search || "").trim().toLowerCase();
+        const status = String(params.status || "").trim();
+
+        let rows = [...fakeDb.students];
+
+        if (search) {
+          rows = rows.filter((s) => {
+            const hay = `${s.firstName || ""} ${s.lastName || ""} ${s.phone || ""} ${s.enrolledService || ""}`.toLowerCase();
+            return hay.includes(search);
+          });
+        }
+
+        if (status && status !== "All") {
+          rows = rows.filter((s) => String(s.status) === status);
+        }
+
+        // Sort newest first (roughly by createdAt when present)
+        rows.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+
+        const total = rows.length;
+        const start = (page - 1) * pageSize;
+        const items = rows.slice(start, start + pageSize);
+
+        return ok({ items, page, pageSize, total });
       },
-      async getById(id) {
+
+      async get(id) {
         await delay(DEFAULT_DELAY_MS);
         const found = fakeDb.students.find((s) => s.id === id);
         return found ? ok({ ...found }) : fail("Student not found", 404);
       },
+
       async create(payload) {
         await delay(DEFAULT_DELAY_MS);
         const created = {
@@ -309,12 +342,31 @@ function createStubModules() {
         });
         return ok(created, 201);
       },
+
       async update(id, payload) {
         await delay(DEFAULT_DELAY_MS);
         const idx = fakeDb.students.findIndex((s) => s.id === id);
         if (idx === -1) return fail("Student not found", 404);
         fakeDb.students[idx] = { ...fakeDb.students[idx], ...payload };
         return ok({ ...fakeDb.students[idx] });
+      },
+
+      async remove(id) {
+        await delay(DEFAULT_DELAY_MS);
+        const idx = fakeDb.students.findIndex((s) => s.id === id);
+        if (idx === -1) return fail("Student not found", 404);
+
+        const removed = fakeDb.students[idx];
+        fakeDb.students.splice(idx, 1);
+
+        fakeDb.activity.unshift({
+          id: `act_${String(Math.random()).slice(2, 6)}`,
+          at: new Date().toISOString().replace("T", " ").slice(0, 16),
+          label: `Student ${removed.firstName} ${removed.lastName} deleted`,
+          meta: "Students",
+        });
+
+        return ok({ id }, 200, "Deleted");
       },
     },
 
@@ -412,9 +464,11 @@ function createNetworkModules(http) {
 
     students: {
       async list(params) {
+        // Prefer explicit params: { page, pageSize, search, status }
+        // (passes through buildQuery which supports both standard + extra keys)
         return http.get("/students", params);
       },
-      async getById(id) {
+      async get(id) {
         return http.get(`/students/${encodeURIComponent(String(id))}`);
       },
       async create(payload) {
@@ -422,6 +476,9 @@ function createNetworkModules(http) {
       },
       async update(id, payload) {
         return http.put(`/students/${encodeURIComponent(String(id))}`, payload);
+      },
+      async remove(id) {
+        return http.del(`/students/${encodeURIComponent(String(id))}`);
       },
     },
 
@@ -530,9 +587,14 @@ export function createApiClient(options = {}) {
         if (!useNetwork) return stubs.students.list(params);
         return network.students.list(params);
       },
+      async get(id) {
+        if (!useNetwork) return stubs.students.get(id);
+        return network.students.get(id);
+      },
+      // Backward compatible alias (some pages may still call getById)
       async getById(id) {
-        if (!useNetwork) return stubs.students.getById(id);
-        return network.students.getById(id);
+        if (!useNetwork) return stubs.students.get(id);
+        return network.students.get(id);
       },
       async create(payload) {
         if (!useNetwork) return stubs.students.create(payload);
@@ -541,6 +603,10 @@ export function createApiClient(options = {}) {
       async update(id, payload) {
         if (!useNetwork) return stubs.students.update(id, payload);
         return network.students.update(id, payload);
+      },
+      async remove(id) {
+        if (!useNetwork) return stubs.students.remove(id);
+        return network.students.remove(id);
       },
     },
 

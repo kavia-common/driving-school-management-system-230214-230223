@@ -1,8 +1,120 @@
-import React from "react";
+import React, { createContext, useCallback, useContext, useMemo, useState } from "react";
 
 /** Utility to join class names */
 function cx(...parts) {
   return parts.filter(Boolean).join(" ");
+}
+
+const ToastContext = createContext(null);
+
+/**
+ * @typedef {{ id: string, type: "success"|"error"|"info", message: string }} ToastItem
+ */
+
+/** @param {ToastItem["type"]} type */
+function toastBg(type) {
+  if (type === "success") return "rgba(245, 158, 11, 0.12)";
+  if (type === "error") return "rgba(239, 68, 68, 0.10)";
+  return "rgba(37, 99, 235, 0.10)";
+}
+
+/** @param {ToastItem["type"]} type */
+function toastBorder(type) {
+  if (type === "success") return "rgba(245, 158, 11, 0.28)";
+  if (type === "error") return "rgba(239, 68, 68, 0.25)";
+  return "rgba(37, 99, 235, 0.22)";
+}
+
+// PUBLIC_INTERFACE
+export function ToastProvider({ children }) {
+  /** This is a public provider for lightweight toast notifications. */
+  const [items, setItems] = useState([]);
+
+  const remove = useCallback((id) => {
+    setItems((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const push = useCallback((type, message, ttlMs = 2600) => {
+    const id = `t_${String(Math.random()).slice(2, 9)}`;
+    const next = { id, type, message };
+    setItems((prev) => [...prev, next]);
+
+    window.setTimeout(() => {
+      remove(id);
+    }, ttlMs);
+
+    return id;
+  }, [remove]);
+
+  const api = useMemo(
+    () => ({
+      success: (message, ttlMs) => push("success", message, ttlMs),
+      error: (message, ttlMs) => push("error", message, ttlMs),
+      info: (message, ttlMs) => push("info", message, ttlMs),
+      remove,
+    }),
+    [push, remove]
+  );
+
+  return (
+    <ToastContext.Provider value={api}>
+      {children}
+
+      {/* Toast viewport */}
+      <div
+        aria-live="polite"
+        aria-relevant="additions"
+        style={{
+          position: "fixed",
+          right: 16,
+          bottom: 16,
+          zIndex: 50,
+          display: "flex",
+          flexDirection: "column",
+          gap: 10,
+          maxWidth: 420,
+        }}
+      >
+        {items.map((t) => (
+          <div
+            key={t.id}
+            role="status"
+            style={{
+              background: toastBg(t.type),
+              border: `1px solid ${toastBorder(t.type)}`,
+              borderRadius: 14,
+              padding: "10px 12px",
+              backdropFilter: "blur(6px)",
+              boxShadow: "var(--shadow-md)",
+              display: "flex",
+              alignItems: "flex-start",
+              justifyContent: "space-between",
+              gap: 10,
+            }}
+          >
+            <div style={{ fontWeight: 800, fontSize: 13, lineHeight: 1.3 }}>{t.message}</div>
+            <button
+              type="button"
+              className="ds-link ds-link--button"
+              onClick={() => remove(t.id)}
+              aria-label="Dismiss notification"
+              style={{ fontWeight: 900 }}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+    </ToastContext.Provider>
+  );
+}
+
+// PUBLIC_INTERFACE
+export function useToast() {
+  /** This is a public hook returning toast helpers (success/error/info). */
+  const ctx = useContext(ToastContext);
+  if (!ctx) throw new Error("useToast must be used within ToastProvider");
+  return ctx;
 }
 
 // PUBLIC_INTERFACE
