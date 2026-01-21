@@ -40,6 +40,8 @@ export function getRuntimeConfig() {
     process.env.REACT_APP_BACKEND_URL ||
     "http://localhost:8080";
 
+  const useNetwork = parseBool(process.env.REACT_APP_USE_NETWORK, false);
+
   return {
     apiBase,
     backendUrl: process.env.REACT_APP_BACKEND_URL || apiBase,
@@ -57,8 +59,13 @@ export function getRuntimeConfig() {
     telemetryDisabled: parseBool(process.env.REACT_APP_NEXT_TELEMETRY_DISABLED, true),
     port: process.env.REACT_APP_PORT || "3000",
 
+    // Highest-precedence switch: when false, all API modules should route to stubs.
+    // When true, API modules may perform real HTTP requests.
+    useNetwork,
+
     // When true, the app uses stubbed auth regardless of backend availability.
     // This keeps the template usable without a backend.
+    // Note: `useNetwork` can still be true; auth module may choose behavior per-call.
     useStubs: parseBool(process.env.REACT_APP_USE_STUBS, false),
   };
 }

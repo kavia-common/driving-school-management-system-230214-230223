@@ -1,22 +1,19 @@
 import { getRuntimeConfig } from "../config/env";
 
-/**
- * Minimal API client wrapper.
- * This client is intentionally stub-first: it provides predictable fake data by default
- * and can be switched to real HTTP by setting `useNetwork` to true later.
- */
+const DEFAULT_DELAY_MS = 250;
+const TOKEN_STORAGE_KEY = "dsms_access_token";
 
 /**
  * @typedef {Object} ApiResult
  * @property {boolean} ok
+ * @property {number} status
  * @property {any} data
- * @property {string=} error
+ * @property {string|null} error
+ * @property {string} message
  */
 
-const DEFAULT_DELAY_MS = 250;
-
 /**
- * Simulate network latency.
+ * Simulate network latency for stubbed mode.
  * @param {number} ms
  * @returns {Promise<void>}
  */
@@ -26,55 +23,185 @@ function delay(ms) {
 
 /**
  * @param {any} data
+ * @param {number} status
+ * @param {string=} message
  * @returns {ApiResult}
  */
-function ok(data) {
-  return { ok: true, data };
+function ok(data, status = 200, message = "OK") {
+  return { ok: true, status, data, error: null, message };
 }
 
 /**
- * @param {string} error
+ * @param {string} message
+ * @param {number} status
+ * @param {any=} data
+ * @param {string=} error
  * @returns {ApiResult}
  */
-function fail(error) {
-  return { ok: false, data: null, error };
+function fail(message, status = 0, data = null, error = "error") {
+  return { ok: false, status, data, error, message };
 }
 
 /**
- * Centralized endpoint builder.
+ * Build an absolute URL for a given API path (supports absolute URLs too).
  * @param {string} path
+ * @returns {string}
  */
 function endpoint(path) {
+  if (/^https?:\/\//i.test(path)) return path;
   const { apiBase } = getRuntimeConfig();
-  return `${String(apiBase).replace(/\/$/, "")}${path}`;
+  return `${String(apiBase).replace(/\/$/, "")}${path.startsWith("/") ? "" : "/"}${path}`;
 }
 
 /**
- * Token-aware network request helper.
- * @param {string} method
- * @param {string} path
- * @param {any=} body
- * @param {string=} token
- * @returns {Promise<ApiResult>}
+ * Read persisted access token (AuthContext uses the same key).
+ * @returns {string|null}
  */
-async function request(method, path, body, token) {
+function readToken() {
   try {
-    const url = endpoint(path);
-    const headers = { "Content-Type": "application/json" };
+    return window.localStorage.getItem(TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build query string with common admin pagination/search/sort conventions.
+ * @param {{
+ *  page?: number,
+ *  pageSize?: number,
+ *  sort?: string,
+ *  order?: "asc"|"desc",
+ *  q?: string,
+ *  filters?: Record<string, any>,
+ *  [key: string]: any
+ * }} params
+ * @returns {string}
+ */
+function buildQuery(params = {}) {
+  const search = new URLSearchParams();
+
+  const safeSet = (k, v) => {
+    if (v === undefined || v === null || v === "") return;
+    search.set(k, String(v));
+  };
+
+  safeSet("page", params.page);
+  safeSet("pageSize", params.pageSize);
+  safeSet("sort", params.sort);
+  safeSet("order", params.order);
+  safeSet("q", params.q);
+
+  if (params.filters && typeof params.filters === "object") {
+    Object.entries(params.filters).forEach(([k, v]) => {
+      if (v === undefined || v === null || v === "") return;
+      if (Array.isArray(v)) v.forEach((vv) => search.append(`filter[${k}]`, String(vv)));
+      else search.append(`filter[${k}]`, String(v));
+    });
+  }
+
+  // Allow extra arbitrary keys (backward compatible with existing callers)
+  Object.entries(params).forEach(([k, v]) => {
+    if (["page", "pageSize", "sort", "order", "q", "filters"].includes(k)) return;
+    if (v === undefined || v === null || v === "") return;
+    if (Array.isArray(v)) v.forEach((vv) => search.append(k, String(vv)));
+    else search.append(k, String(v));
+  });
+
+  const qs = search.toString();
+  return qs ? `?${qs}` : "";
+}
+
+/**
+ * Normalize different kinds of fetch failures into a stable ApiResult.
+ * @param {Response|null} res
+ * @param {any} body
+ * @param {Error|any} err
+ * @returns {ApiResult}
+ */
+function normalizeError(res, body, err) {
+  if (res) {
+    const status = res.status;
+    // Try common API error shapes
+    const message =
+      body?.message ||
+      body?.error ||
+      (typeof body === "string" ? body : null) ||
+      `Request failed (${status})`;
+
+    return fail(message, status, body ?? null, body?.error || "http_error");
+  }
+
+  const message = err instanceof Error ? err.message : "Network error";
+  return fail(message, 0, null, "network_error");
+}
+
+/**
+ * Create an HTTP client with token injection, JSON handling, and 401 callback.
+ * @param {{ getToken?: () => string|null, onUnauthorized?: (info: ApiResult) => void }} options
+ */
+function createHttpClient(options = {}) {
+  const getToken = typeof options.getToken === "function" ? options.getToken : () => readToken();
+  const onUnauthorized = typeof options.onUnauthorized === "function" ? options.onUnauthorized : null;
+
+  /**
+   * @param {string} method
+   * @param {string} path
+   * @param {{ body?: any, params?: any, headers?: Record<string,string> }=} options2
+   * @returns {Promise<ApiResult>}
+   */
+  async function request(method, path, options2 = {}) {
+    const url = endpoint(path) + buildQuery(options2.params || {});
+    const token = getToken();
+
+    /** @type {Record<string,string>} */
+    const headers = {
+      Accept: "application/json",
+      ...(options2.headers || {}),
+    };
+
+    // Attach JSON header only when body exists; supports FormData later.
+    const hasBody = options2.body !== undefined && options2.body !== null;
+    const isFormData = typeof FormData !== "undefined" && options2.body instanceof FormData;
+    if (hasBody && !isFormData) headers["Content-Type"] = "application/json";
+
     if (token) headers.Authorization = `Bearer ${token}`;
 
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: body == null ? undefined : JSON.stringify(body),
-    });
+    try {
+      const res = await fetch(url, {
+        method,
+        headers,
+        body: hasBody ? (isFormData ? options2.body : JSON.stringify(options2.body)) : undefined,
+      });
 
-    if (!res.ok) return fail(`Request failed (${res.status})`);
-    const json = await res.json().catch(() => null);
-    return ok(json);
-  } catch (e) {
-    return fail(e instanceof Error ? e.message : "Unknown error");
+      const contentType = res.headers.get("content-type") || "";
+      const isJson = contentType.includes("application/json");
+      const body = isJson ? await res.json().catch(() => null) : await res.text().catch(() => null);
+
+      if (res.status === 401 && onUnauthorized) {
+        const info = normalizeError(res, body, null);
+        try {
+          onUnauthorized(info);
+        } catch {
+          // Do not break the original request flow if callback throws.
+        }
+      }
+
+      if (!res.ok) return normalizeError(res, body, null);
+      return ok(body, res.status, "OK");
+    } catch (e) {
+      return normalizeError(null, null, e);
+    }
   }
+
+  return {
+    request,
+    get: (path, params, headers) => request("GET", path, { params, headers }),
+    post: (path, body, params, headers) => request("POST", path, { body, params, headers }),
+    put: (path, body, params, headers) => request("PUT", path, { body, params, headers }),
+    patch: (path, body, params, headers) => request("PATCH", path, { body, params, headers }),
+    del: (path, params, headers) => request("DELETE", path, { params, headers }),
+  };
 }
 
 /**
@@ -124,89 +251,21 @@ const fakeDb = {
   ],
 };
 
-/**
- * Stub toggles: keep false for now to avoid assuming a backend exists.
- * Auth is special: it will attempt network login when `useNetwork` is true, but can fall back to stubs.
- */
-const useNetwork = false;
-
-function demoAuth() {
+function demoAuthResponse() {
   return ok({
     accessToken: "demo-token",
     user: { id: "usr_demo", email: "admin@demo.local", name: "Demo Admin", roles: ["admin"] },
   });
 }
 
-// PUBLIC_INTERFACE
-export function createApiClient() {
-  /** This is a public function returning the DSMS API client (stub-first). */
+/**
+ * Create the stub-first API modules (pure in-memory).
+ * Kept separate so network mode can reuse signatures.
+ */
+function createStubModules() {
   return {
-    config: getRuntimeConfig,
-    endpoints: {
-      students: () => endpoint("/students"),
-      instructors: () => endpoint("/instructors"),
-      services: () => endpoint("/services"),
-      documents: () => endpoint("/documents"),
-      transactions: () => endpoint("/finance/transactions"),
-      activity: () => endpoint("/activity"),
-      login: () => endpoint("/auth/login"),
-      me: () => endpoint("/auth/me"),
-    },
-
-    auth: {
-      /**
-       * Login with email/password.
-       * In stub mode, always succeeds with a demo admin user.
-       * In network mode, attempts POST /auth/login and falls back to demo user if backend is unavailable.
-       * @param {{email: string, password: string}} payload
-       * @returns {Promise<ApiResult>}
-       */
-      async login(payload) {
-        const { useStubs } = getRuntimeConfig();
-        if (useStubs) {
-          await delay(DEFAULT_DELAY_MS);
-          return demoAuth();
-        }
-
-        if (useNetwork) {
-          const res = await request("POST", "/auth/login", payload);
-          if (res.ok) return res;
-          // Keep the UI usable if auth endpoint isn't up yet.
-          return demoAuth();
-        }
-
-        await delay(DEFAULT_DELAY_MS);
-        return demoAuth();
-      },
-
-      /**
-       * Fetch current user profile for an existing session.
-       * In stub mode returns demo profile.
-       * In network mode calls GET /auth/me and falls back to demo profile if backend is unavailable.
-       * @param {string} token
-       * @returns {Promise<ApiResult>}
-       */
-      async me(token) {
-        const { useStubs } = getRuntimeConfig();
-        if (useStubs) {
-          await delay(DEFAULT_DELAY_MS);
-          return ok({ id: "usr_demo", email: "admin@demo.local", name: "Demo Admin", roles: ["admin"] });
-        }
-
-        if (useNetwork) {
-          const res = await request("GET", "/auth/me", undefined, token);
-          if (res.ok) return res;
-          return ok({ id: "usr_demo", email: "admin@demo.local", name: "Demo Admin", roles: ["admin"] });
-        }
-
-        await delay(DEFAULT_DELAY_MS);
-        return ok({ id: "usr_demo", email: "admin@demo.local", name: "Demo Admin", roles: ["admin"] });
-      },
-    },
-
     dashboard: {
       async getSummary() {
-        if (useNetwork) return request("GET", "/dashboard/summary");
         await delay(DEFAULT_DELAY_MS);
         return ok({
           kpis: [
@@ -225,18 +284,15 @@ export function createApiClient() {
 
     students: {
       async list() {
-        if (useNetwork) return request("GET", "/students");
         await delay(DEFAULT_DELAY_MS);
         return ok([...fakeDb.students]);
       },
       async getById(id) {
-        if (useNetwork) return request("GET", `/students/${id}`);
         await delay(DEFAULT_DELAY_MS);
         const found = fakeDb.students.find((s) => s.id === id);
-        return found ? ok({ ...found }) : fail("Student not found");
+        return found ? ok({ ...found }) : fail("Student not found", 404);
       },
       async create(payload) {
-        if (useNetwork) return request("POST", "/students", payload);
         await delay(DEFAULT_DELAY_MS);
         const created = {
           id: `stu_${String(Math.random()).slice(2, 6)}`,
@@ -251,13 +307,12 @@ export function createApiClient() {
           label: `Student ${created.firstName} ${created.lastName} added`,
           meta: "Students",
         });
-        return ok(created);
+        return ok(created, 201);
       },
       async update(id, payload) {
-        if (useNetwork) return request("PUT", `/students/${id}`, payload);
         await delay(DEFAULT_DELAY_MS);
         const idx = fakeDb.students.findIndex((s) => s.id === id);
-        if (idx === -1) return fail("Student not found");
+        if (idx === -1) return fail("Student not found", 404);
         fakeDb.students[idx] = { ...fakeDb.students[idx], ...payload };
         return ok({ ...fakeDb.students[idx] });
       },
@@ -265,15 +320,13 @@ export function createApiClient() {
 
     instructors: {
       async list() {
-        if (useNetwork) return request("GET", "/instructors");
         await delay(DEFAULT_DELAY_MS);
         return ok([...fakeDb.instructors]);
       },
       async assign({ instructorId, studentId }) {
-        if (useNetwork) return request("POST", "/instructors/assign", { instructorId, studentId });
         await delay(DEFAULT_DELAY_MS);
         const inst = fakeDb.instructors.find((i) => i.id === instructorId);
-        if (!inst) return fail("Instructor not found");
+        if (!inst) return fail("Instructor not found", 404);
         inst.status = "Assigned";
         fakeDb.activity.unshift({
           id: `act_${String(Math.random()).slice(2, 6)}`,
@@ -287,38 +340,33 @@ export function createApiClient() {
 
     services: {
       async list() {
-        if (useNetwork) return request("GET", "/services");
         await delay(DEFAULT_DELAY_MS);
         return ok([...fakeDb.services]);
       },
       async update(id, payload) {
-        if (useNetwork) return request("PUT", `/services/${id}`, payload);
         await delay(DEFAULT_DELAY_MS);
         const idx = fakeDb.services.findIndex((s) => s.id === id);
-        if (idx === -1) return fail("Service not found");
+        if (idx === -1) return fail("Service not found", 404);
         fakeDb.services[idx] = { ...fakeDb.services[idx], ...payload };
         return ok({ ...fakeDb.services[idx] });
       },
       async create(payload) {
-        if (useNetwork) return request("POST", "/services", payload);
         await delay(DEFAULT_DELAY_MS);
         const created = { id: `srv_${String(Math.random()).slice(2, 6)}`, active: true, ...payload };
         fakeDb.services.unshift(created);
-        return ok(created);
+        return ok(created, 201);
       },
     },
 
     documents: {
       async list() {
-        if (useNetwork) return request("GET", "/documents");
         await delay(DEFAULT_DELAY_MS);
         return ok([...fakeDb.documents]);
       },
       async updateStatus(id, status) {
-        if (useNetwork) return request("PUT", `/documents/${id}`, { status });
         await delay(DEFAULT_DELAY_MS);
         const idx = fakeDb.documents.findIndex((d) => d.id === id);
-        if (idx === -1) return fail("Document not found");
+        if (idx === -1) return fail("Document not found", 404);
         fakeDb.documents[idx] = {
           ...fakeDb.documents[idx],
           status,
@@ -330,10 +378,241 @@ export function createApiClient() {
 
     finance: {
       async listTransactions() {
-        if (useNetwork) return request("GET", "/finance/transactions");
         await delay(DEFAULT_DELAY_MS);
         return ok([...fakeDb.transactions]);
       },
     },
+
+    auth: {
+      async login() {
+        await delay(DEFAULT_DELAY_MS);
+        return demoAuthResponse();
+      },
+      async me() {
+        await delay(DEFAULT_DELAY_MS);
+        return ok({ id: "usr_demo", email: "admin@demo.local", name: "Demo Admin", roles: ["admin"] });
+      },
+    },
   };
 }
+
+/**
+ * Create the network-backed API modules.
+ * Paths are centralized here (no hardcoding outside the client).
+ * @param {ReturnType<typeof createHttpClient>} http
+ */
+function createNetworkModules(http) {
+  return {
+    dashboard: {
+      async getSummary(params) {
+        // Optional params for future pagination/filters
+        return http.get("/dashboard/summary", params);
+      },
+    },
+
+    students: {
+      async list(params) {
+        return http.get("/students", params);
+      },
+      async getById(id) {
+        return http.get(`/students/${encodeURIComponent(String(id))}`);
+      },
+      async create(payload) {
+        return http.post("/students", payload);
+      },
+      async update(id, payload) {
+        return http.put(`/students/${encodeURIComponent(String(id))}`, payload);
+      },
+    },
+
+    instructors: {
+      async list(params) {
+        return http.get("/instructors", params);
+      },
+      async assign({ instructorId, studentId }) {
+        return http.post("/instructors/assign", { instructorId, studentId });
+      },
+    },
+
+    services: {
+      async list(params) {
+        return http.get("/services", params);
+      },
+      async update(id, payload) {
+        return http.put(`/services/${encodeURIComponent(String(id))}`, payload);
+      },
+      async create(payload) {
+        return http.post("/services", payload);
+      },
+    },
+
+    documents: {
+      async list(params) {
+        return http.get("/documents", params);
+      },
+      async updateStatus(id, status) {
+        return http.put(`/documents/${encodeURIComponent(String(id))}`, { status });
+      },
+    },
+
+    finance: {
+      async listTransactions(params) {
+        return http.get("/finance/transactions", params);
+      },
+    },
+
+    auth: {
+      async login(payload) {
+        return http.post("/auth/login", payload);
+      },
+      async me() {
+        return http.get("/auth/me");
+      },
+    },
+  };
+}
+
+// PUBLIC_INTERFACE
+export function createApiClient(options = {}) {
+  /** This is a public function returning the DSMS API client (stub-first, env-driven network switch). */
+  const cfg = getRuntimeConfig();
+
+  const stubs = createStubModules();
+
+  const http = createHttpClient({
+    getToken: options.getToken || readToken,
+    onUnauthorized:
+      options.onUnauthorized ||
+      (() => {
+        // Default behavior: clear stored token so AuthContext bootstrapping will reset.
+        try {
+          window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+        } catch {
+          // ignore
+        }
+      }),
+  });
+
+  const network = createNetworkModules(http);
+
+  // Highest precedence: explicit disable network => force stubs.
+  // If network enabled but stubs enabled, we still use stub auth (keeps login usable),
+  // while allowing other modules to use network.
+  const useNetwork = Boolean(cfg.useNetwork);
+
+  return {
+    // keep existing behavior/exports
+    config: getRuntimeConfig,
+    buildQuery,
+
+    // Backward-compatible endpoints helper (still useful for debug)
+    endpoints: {
+      students: () => endpoint("/students"),
+      instructors: () => endpoint("/instructors"),
+      services: () => endpoint("/services"),
+      documents: () => endpoint("/documents"),
+      transactions: () => endpoint("/finance/transactions"),
+      activity: () => endpoint("/activity"),
+      login: () => endpoint("/auth/login"),
+      me: () => endpoint("/auth/me"),
+    },
+
+    // Modules: route based on env
+    dashboard: {
+      async getSummary(params) {
+        if (!useNetwork) return stubs.dashboard.getSummary(params);
+        return network.dashboard.getSummary(params);
+      },
+    },
+
+    students: {
+      async list(params) {
+        if (!useNetwork) return stubs.students.list(params);
+        return network.students.list(params);
+      },
+      async getById(id) {
+        if (!useNetwork) return stubs.students.getById(id);
+        return network.students.getById(id);
+      },
+      async create(payload) {
+        if (!useNetwork) return stubs.students.create(payload);
+        return network.students.create(payload);
+      },
+      async update(id, payload) {
+        if (!useNetwork) return stubs.students.update(id, payload);
+        return network.students.update(id, payload);
+      },
+    },
+
+    instructors: {
+      async list(params) {
+        if (!useNetwork) return stubs.instructors.list(params);
+        return network.instructors.list(params);
+      },
+      async assign(payload) {
+        if (!useNetwork) return stubs.instructors.assign(payload);
+        return network.instructors.assign(payload);
+      },
+    },
+
+    services: {
+      async list(params) {
+        if (!useNetwork) return stubs.services.list(params);
+        return network.services.list(params);
+      },
+      async update(id, payload) {
+        if (!useNetwork) return stubs.services.update(id, payload);
+        return network.services.update(id, payload);
+      },
+      async create(payload) {
+        if (!useNetwork) return stubs.services.create(payload);
+        return network.services.create(payload);
+      },
+    },
+
+    documents: {
+      async list(params) {
+        if (!useNetwork) return stubs.documents.list(params);
+        return network.documents.list(params);
+      },
+      async updateStatus(id, status) {
+        if (!useNetwork) return stubs.documents.updateStatus(id, status);
+        return network.documents.updateStatus(id, status);
+      },
+    },
+
+    finance: {
+      async listTransactions(params) {
+        if (!useNetwork) return stubs.finance.listTransactions(params);
+        return network.finance.listTransactions(params);
+      },
+    },
+
+    auth: {
+      async login(payload) {
+        // Auth can be forced to stub via useStubs, regardless of network switch.
+        if (cfg.useStubs) return stubs.auth.login(payload);
+        if (!useNetwork) return stubs.auth.login(payload);
+
+        const res = await network.auth.login(payload);
+        // Keep app usable even if backend auth isn't up yet.
+        if (!res.ok) return demoAuthResponse();
+        return res;
+      },
+
+      async me() {
+        if (cfg.useStubs) return stubs.auth.me();
+        if (!useNetwork) return stubs.auth.me();
+
+        const res = await network.auth.me();
+        // Keep UX stable if backend isn't ready.
+        if (!res.ok) return stubs.auth.me();
+        return res;
+      },
+    },
+  };
+}
+
+// PUBLIC_INTERFACE
+export const api = createApiClient();
+/** This is a public default API singleton export (backward-compatible convenience). */
