@@ -13,6 +13,7 @@ import Dashboard from "./pages/Dashboard";
 import StudentsList from "./pages/StudentsList";
 import StudentForm from "./pages/StudentForm";
 import Instructors from "./pages/Instructors";
+import InstructorForm from "./pages/InstructorForm";
 import Services from "./pages/Services";
 import Documents from "./pages/Documents";
 import Finance from "./pages/Finance";
@@ -41,6 +42,8 @@ function App() {
                   {/* manager OR admin */}
                   <Route element={<ProtectedRoute requiredRoles={["manager", "admin"]} />}>
                     <Route path="/instructors" element={<Instructors />} />
+                    <Route path="/instructors/new" element={<InstructorForm />} />
+                    <Route path="/instructors/:id" element={<InstructorForm />} />
                     <Route path="/services" element={<Services />} />
                   </Route>
 
@@ -63,4 +66,3 @@ function App() {
 }
 
 export default App;
-

@@ -229,8 +229,8 @@ const fakeDb = {
     },
   ],
   instructors: [
-    { id: "ins_001", name: "Sophia Reed", phone: "+1 (555) 010-4001", status: "Available" },
-    { id: "ins_002", name: "Omar Ali", phone: "+1 (555) 010-4011", status: "Assigned" },
+    { id: "ins_001", firstName: "Sophia", lastName: "Reed", phone: "+1 (555) 010-4001", status: "Available", createdAt: "2026-01-04" },
+    { id: "ins_002", firstName: "Omar", lastName: "Ali", phone: "+1 (555) 010-4011", status: "Assigned", createdAt: "2026-01-10" },
   ],
   services: [
     { id: "srv_001", name: "Standard Package", price: 350, lessons: 10, active: true },
@@ -249,6 +249,13 @@ const fakeDb = {
     { id: "act_002", at: "2026-01-16 14:28", label: "Document marked missing", meta: "Documents" },
     { id: "act_003", at: "2026-01-15 09:05", label: "Instructor assigned to student", meta: "Instructors" },
   ],
+  /**
+   * Stub mapping: instructorId -> studentIds[]
+   * Used by the Instructors module assignment UI in stub mode.
+   */
+  instructorStudents: {
+    ins_002: ["stu_001"],
+  },
 };
 
 function demoAuthResponse() {
@@ -371,21 +378,148 @@ function createStubModules() {
     },
 
     instructors: {
-      async list() {
+      /**
+       * List instructors with stubbed server-like behavior:
+       * - supports { page, pageSize, search, status }
+       * - returns { items, page, pageSize, total }
+       */
+      async list(params = {}) {
         await delay(DEFAULT_DELAY_MS);
-        return ok([...fakeDb.instructors]);
+
+        const page = Number(params.page) > 0 ? Number(params.page) : 1;
+        const pageSize = Number(params.pageSize) > 0 ? Number(params.pageSize) : 10;
+        const search = String(params.search || "").trim().toLowerCase();
+        const status = String(params.status || "").trim();
+
+        let rows = [...fakeDb.instructors];
+
+        if (search) {
+          rows = rows.filter((i) => {
+            const hay = `${i.firstName || ""} ${i.lastName || ""} ${i.phone || ""}`.toLowerCase();
+            return hay.includes(search);
+          });
+        }
+
+        if (status && status !== "All") {
+          rows = rows.filter((i) => String(i.status) === status);
+        }
+
+        // Sort newest first (roughly by createdAt when present)
+        rows.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+
+        const total = rows.length;
+        const start = (page - 1) * pageSize;
+        const items = rows.slice(start, start + pageSize);
+
+        return ok({ items, page, pageSize, total });
       },
-      async assign({ instructorId, studentId }) {
+
+      async get(id) {
         await delay(DEFAULT_DELAY_MS);
-        const inst = fakeDb.instructors.find((i) => i.id === instructorId);
-        if (!inst) return fail("Instructor not found", 404);
-        inst.status = "Assigned";
+        const found = fakeDb.instructors.find((i) => i.id === id);
+        return found ? ok({ ...found }) : fail("Instructor not found", 404);
+      },
+
+      async create(payload) {
+        await delay(DEFAULT_DELAY_MS);
+        const created = {
+          id: `ins_${String(Math.random()).slice(2, 6)}`,
+          createdAt: new Date().toISOString().slice(0, 10),
+          status: payload.status || "Available",
+          ...payload,
+        };
+        fakeDb.instructors.unshift(created);
+
         fakeDb.activity.unshift({
           id: `act_${String(Math.random()).slice(2, 6)}`,
           at: new Date().toISOString().replace("T", " ").slice(0, 16),
-          label: `Instructor assigned to student ${studentId}`,
+          label: `Instructor ${created.firstName || ""} ${created.lastName || ""} added`,
           meta: "Instructors",
         });
+
+        return ok(created, 201);
+      },
+
+      async update(id, payload) {
+        await delay(DEFAULT_DELAY_MS);
+        const idx = fakeDb.instructors.findIndex((i) => i.id === id);
+        if (idx === -1) return fail("Instructor not found", 404);
+        fakeDb.instructors[idx] = { ...fakeDb.instructors[idx], ...payload };
+        return ok({ ...fakeDb.instructors[idx] });
+      },
+
+      async remove(id) {
+        await delay(DEFAULT_DELAY_MS);
+        const idx = fakeDb.instructors.findIndex((i) => i.id === id);
+        if (idx === -1) return fail("Instructor not found", 404);
+
+        const removed = fakeDb.instructors[idx];
+        fakeDb.instructors.splice(idx, 1);
+        delete fakeDb.instructorStudents[String(id)];
+
+        fakeDb.activity.unshift({
+          id: `act_${String(Math.random()).slice(2, 6)}`,
+          at: new Date().toISOString().replace("T", " ").slice(0, 16),
+          label: `Instructor ${removed.firstName || ""} ${removed.lastName || ""} deleted`,
+          meta: "Instructors",
+        });
+
+        return ok({ id }, 200, "Deleted");
+      },
+
+      async listAssignedStudents(instructorId) {
+        await delay(DEFAULT_DELAY_MS);
+        const ids = fakeDb.instructorStudents[String(instructorId)] || [];
+        const items = fakeDb.students.filter((s) => ids.includes(s.id));
+        return ok(items);
+      },
+
+      async assignStudent({ instructorId, studentId }) {
+        await delay(DEFAULT_DELAY_MS);
+
+        const inst = fakeDb.instructors.find((i) => i.id === instructorId);
+        const stu = fakeDb.students.find((s) => s.id === studentId);
+
+        if (!inst) return fail("Instructor not found", 404);
+        if (!stu) return fail("Student not found", 404);
+
+        const key = String(instructorId);
+        const list = Array.isArray(fakeDb.instructorStudents[key]) ? fakeDb.instructorStudents[key] : [];
+        if (!list.includes(String(studentId))) list.push(String(studentId));
+        fakeDb.instructorStudents[key] = list;
+
+        // Keep a simple derived status for UI
+        inst.status = list.length > 0 ? "Assigned" : "Available";
+
+        fakeDb.activity.unshift({
+          id: `act_${String(Math.random()).slice(2, 6)}`,
+          at: new Date().toISOString().replace("T", " ").slice(0, 16),
+          label: `Student ${studentId} attached to instructor ${instructorId}`,
+          meta: "Instructors",
+        });
+
+        return ok({ instructorId, studentId });
+      },
+
+      async unassignStudent({ instructorId, studentId }) {
+        await delay(DEFAULT_DELAY_MS);
+
+        const inst = fakeDb.instructors.find((i) => i.id === instructorId);
+        if (!inst) return fail("Instructor not found", 404);
+
+        const key = String(instructorId);
+        const list = Array.isArray(fakeDb.instructorStudents[key]) ? fakeDb.instructorStudents[key] : [];
+        fakeDb.instructorStudents[key] = list.filter((id) => id !== String(studentId));
+
+        inst.status = fakeDb.instructorStudents[key].length > 0 ? "Assigned" : "Available";
+
+        fakeDb.activity.unshift({
+          id: `act_${String(Math.random()).slice(2, 6)}`,
+          at: new Date().toISOString().replace("T", " ").slice(0, 16),
+          label: `Student ${studentId} detached from instructor ${instructorId}`,
+          meta: "Instructors",
+        });
+
         return ok({ instructorId, studentId });
       },
     },
@@ -486,6 +620,31 @@ function createNetworkModules(http) {
       async list(params) {
         return http.get("/instructors", params);
       },
+      async get(id) {
+        return http.get(`/instructors/${encodeURIComponent(String(id))}`);
+      },
+      async create(payload) {
+        return http.post("/instructors", payload);
+      },
+      async update(id, payload) {
+        return http.put(`/instructors/${encodeURIComponent(String(id))}`, payload);
+      },
+      async remove(id) {
+        return http.del(`/instructors/${encodeURIComponent(String(id))}`);
+      },
+
+      // Assignment endpoints (best-guess REST names; stub mode still works if backend differs)
+      async listAssignedStudents(instructorId) {
+        return http.get(`/instructors/${encodeURIComponent(String(instructorId))}/students`);
+      },
+      async assignStudent({ instructorId, studentId }) {
+        return http.post(`/instructors/${encodeURIComponent(String(instructorId))}/students`, { studentId });
+      },
+      async unassignStudent({ instructorId, studentId }) {
+        return http.del(`/instructors/${encodeURIComponent(String(instructorId))}/students/${encodeURIComponent(String(studentId))}`);
+      },
+
+      // Backward-compatible existing endpoint
       async assign({ instructorId, studentId }) {
         return http.post("/instructors/assign", { instructorId, studentId });
       },
@@ -615,8 +774,42 @@ export function createApiClient(options = {}) {
         if (!useNetwork) return stubs.instructors.list(params);
         return network.instructors.list(params);
       },
+      async get(id) {
+        if (!useNetwork) return stubs.instructors.get(id);
+        return network.instructors.get(id);
+      },
+      async create(payload) {
+        if (!useNetwork) return stubs.instructors.create(payload);
+        return network.instructors.create(payload);
+      },
+      async update(id, payload) {
+        if (!useNetwork) return stubs.instructors.update(id, payload);
+        return network.instructors.update(id, payload);
+      },
+      async remove(id) {
+        if (!useNetwork) return stubs.instructors.remove(id);
+        return network.instructors.remove(id);
+      },
+
+      async listAssignedStudents(instructorId) {
+        if (!useNetwork) return stubs.instructors.listAssignedStudents(instructorId);
+        return network.instructors.listAssignedStudents(instructorId);
+      },
+      async assignStudent(payload) {
+        if (!useNetwork) return stubs.instructors.assignStudent(payload);
+        return network.instructors.assignStudent(payload);
+      },
+      async unassignStudent(payload) {
+        if (!useNetwork) return stubs.instructors.unassignStudent(payload);
+        return network.instructors.unassignStudent(payload);
+      },
+
+      // Backward compatible (older pages/flows)
       async assign(payload) {
-        if (!useNetwork) return stubs.instructors.assign(payload);
+        if (!useNetwork) {
+          // Map to new stub name
+          return stubs.instructors.assignStudent(payload);
+        }
         return network.instructors.assign(payload);
       },
     },
