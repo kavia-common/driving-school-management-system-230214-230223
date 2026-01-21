@@ -48,12 +48,12 @@ function App() {
                     <Route path="/services" element={<Services />} />
                     <Route path="/services/new" element={<ServiceForm />} />
                     <Route path="/services/:id" element={<ServiceForm />} />
+                    <Route path="/finance" element={<Finance />} />
                   </Route>
 
                   {/* admin only */}
                   <Route element={<ProtectedRoute requiredRoles={["admin"]} />}>
                     <Route path="/documents" element={<Documents />} />
-                    <Route path="/finance" element={<Finance />} />
                   </Route>
                 </Route>
               </Route>

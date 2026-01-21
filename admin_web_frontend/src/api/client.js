@@ -240,8 +240,26 @@ const fakeDb = {
     { id: "doc_002", studentId: "stu_001", type: "Medical", status: "Received", updatedAt: "2026-01-06" },
   ],
   transactions: [
-    { id: "txn_001", date: "2026-01-07", type: "Payment", amount: 350, status: "Completed" },
-    { id: "txn_002", date: "2026-01-17", type: "Refund", amount: -50, status: "Pending" },
+    {
+      id: "txn_001",
+      date: "2026-01-07",
+      type: "Payment",
+      amount: 350,
+      status: "Completed",
+      reference: "INV-1001",
+      customer: "Amina Khan",
+      notes: "Standard Package",
+    },
+    {
+      id: "txn_002",
+      date: "2026-01-17",
+      type: "Refund",
+      amount: -50,
+      status: "Pending",
+      reference: "RF-2001",
+      customer: "Jon Miller",
+      notes: "Scheduling conflict",
+    },
   ],
   activity: [
     { id: "act_001", at: "2026-01-17 10:12", label: "Student Jon Miller added", meta: "Students" },
@@ -712,9 +730,155 @@ function createStubModules() {
     },
 
     finance: {
-      async listTransactions() {
+      /**
+       * List transactions with server-like behavior:
+       * - filters: { from, to, type, status }
+       * - search: q/search (matches id/reference/customer/notes/type/status)
+       * - pagination: page/pageSize
+       * - sorting: sort/order (supports date, amount, status, type)
+       * Returns: { items, page, pageSize, total }
+       */
+      async list(params = {}) {
         await delay(DEFAULT_DELAY_MS);
-        return ok([...fakeDb.transactions]);
+
+        const page = Number(params.page) > 0 ? Number(params.page) : 1;
+        const pageSize = Number(params.pageSize) > 0 ? Number(params.pageSize) : 10;
+
+        const q = String(params.search || params.q || "").trim().toLowerCase();
+
+        const filters = params.filters && typeof params.filters === "object" ? params.filters : {};
+        const from = String(params.from || filters.from || "").trim();
+        const to = String(params.to || filters.to || "").trim();
+        const type = String(params.type || filters.type || "").trim();
+        const status = String(params.status || filters.status || "").trim();
+
+        const sort = String(params.sort || "date").trim();
+        const order = String(params.order || "desc").trim().toLowerCase() === "asc" ? "asc" : "desc";
+
+        let rows = [...fakeDb.transactions];
+
+        // Date range filter (expects YYYY-MM-DD; compares lexicographically)
+        if (from) rows = rows.filter((t) => String(t.date || "") >= from);
+        if (to) rows = rows.filter((t) => String(t.date || "") <= to);
+
+        if (type && type !== "All") rows = rows.filter((t) => String(t.type) === type);
+        if (status && status !== "All") rows = rows.filter((t) => String(t.status) === status);
+
+        if (q) {
+          rows = rows.filter((t) => {
+            const hay = `${t.id || ""} ${t.reference || ""} ${t.customer || ""} ${t.notes || ""} ${t.type || ""} ${t.status || ""}`.toLowerCase();
+            return hay.includes(q);
+          });
+        }
+
+        const compare = (a, b) => {
+          const dir = order === "asc" ? 1 : -1;
+
+          if (sort === "amount") {
+            const av = Number(a.amount) || 0;
+            const bv = Number(b.amount) || 0;
+            return (av - bv) * dir;
+          }
+
+          const av = String(a[sort] ?? "");
+          const bv = String(b[sort] ?? "");
+          return av.localeCompare(bv) * dir;
+        };
+
+        rows.sort(compare);
+
+        const total = rows.length;
+        const start = (page - 1) * pageSize;
+        const items = rows.slice(start, start + pageSize);
+
+        return ok({ items, page, pageSize, total });
+      },
+
+      async get(id) {
+        await delay(DEFAULT_DELAY_MS);
+        const found = fakeDb.transactions.find((t) => t.id === id);
+        return found ? ok({ ...found }) : fail("Transaction not found", 404);
+      },
+
+      async create(payload = {}) {
+        await delay(DEFAULT_DELAY_MS);
+
+        const date = String(payload.date || new Date().toISOString().slice(0, 10));
+        const type2 = String(payload.type || "Payment").trim() || "Payment";
+        const status2 = String(payload.status || "Pending").trim() || "Pending";
+        const amount2 = Number(payload.amount);
+        if (Number.isNaN(amount2)) return fail("amount must be a number", 400);
+
+        const created = {
+          id: `txn_${String(Math.random()).slice(2, 6)}`,
+          date,
+          type: type2,
+          status: status2,
+          amount: amount2,
+          reference: payload.reference || "",
+          customer: payload.customer || "",
+          notes: payload.notes || "",
+        };
+
+        fakeDb.transactions.unshift(created);
+
+        fakeDb.activity.unshift({
+          id: `act_${String(Math.random()).slice(2, 6)}`,
+          at: new Date().toISOString().replace("T", " ").slice(0, 16),
+          label: `Finance transaction ${created.id} created`,
+          meta: "Finance",
+        });
+
+        return ok(created, 201);
+      },
+
+      async update(id, payload = {}) {
+        await delay(DEFAULT_DELAY_MS);
+        const idx = fakeDb.transactions.findIndex((t) => t.id === id);
+        if (idx === -1) return fail("Transaction not found", 404);
+
+        fakeDb.transactions[idx] = { ...fakeDb.transactions[idx], ...payload };
+        return ok({ ...fakeDb.transactions[idx] });
+      },
+
+      async remove(id) {
+        await delay(DEFAULT_DELAY_MS);
+        const idx = fakeDb.transactions.findIndex((t) => t.id === id);
+        if (idx === -1) return fail("Transaction not found", 404);
+
+        fakeDb.transactions.splice(idx, 1);
+
+        fakeDb.activity.unshift({
+          id: `act_${String(Math.random()).slice(2, 6)}`,
+          at: new Date().toISOString().replace("T", " ").slice(0, 16),
+          label: `Finance transaction ${id} deleted`,
+          meta: "Finance",
+        });
+
+        return ok({ id }, 200, "Deleted");
+      },
+
+      async getSummary(params = {}) {
+        // Summary is derived from list() to ensure filters/search affect KPIs consistently.
+        const listRes = await this.list({ ...params, page: 1, pageSize: 100000 });
+        if (!listRes.ok) return listRes;
+
+        const items = listRes.data?.items || [];
+        const totalRevenue = items.reduce((acc, t) => acc + (Number(t.amount) > 0 ? Number(t.amount) : 0), 0);
+        const refunds = items.reduce((acc, t) => acc + (Number(t.amount) < 0 ? Math.abs(Number(t.amount)) : 0), 0);
+        const pending = items.filter((t) => String(t.status) === "Pending").length;
+
+        return ok({ totalRevenue, refunds, pending });
+      },
+
+      // Backward compatible: prior Finance page used listTransactions()
+      async listTransactions(params) {
+        // When older callers expect an array, keep returning array if no params supplied.
+        if (!params) {
+          await delay(DEFAULT_DELAY_MS);
+          return ok([...fakeDb.transactions]);
+        }
+        return this.list(params);
       },
     },
 
@@ -858,6 +1022,26 @@ function createNetworkModules(http) {
     },
 
     finance: {
+      async list(params) {
+        return http.get("/finance/transactions", params);
+      },
+      async get(id) {
+        return http.get(`/finance/transactions/${encodeURIComponent(String(id))}`);
+      },
+      async create(payload) {
+        return http.post("/finance/transactions", payload);
+      },
+      async update(id, payload) {
+        return http.put(`/finance/transactions/${encodeURIComponent(String(id))}`, payload);
+      },
+      async remove(id) {
+        return http.del(`/finance/transactions/${encodeURIComponent(String(id))}`);
+      },
+      async getSummary(params) {
+        return http.get("/finance/summary", params);
+      },
+
+      // Backward compatible
       async listTransactions(params) {
         return http.get("/finance/transactions", params);
       },
@@ -1038,6 +1222,32 @@ export function createApiClient(options = {}) {
     },
 
     finance: {
+      async list(params) {
+        if (!useNetwork) return stubs.finance.list(params);
+        return network.finance.list(params);
+      },
+      async get(id) {
+        if (!useNetwork) return stubs.finance.get(id);
+        return network.finance.get(id);
+      },
+      async create(payload) {
+        if (!useNetwork) return stubs.finance.create(payload);
+        return network.finance.create(payload);
+      },
+      async update(id, payload) {
+        if (!useNetwork) return stubs.finance.update(id, payload);
+        return network.finance.update(id, payload);
+      },
+      async remove(id) {
+        if (!useNetwork) return stubs.finance.remove(id);
+        return network.finance.remove(id);
+      },
+      async getSummary(params) {
+        if (!useNetwork) return stubs.finance.getSummary(params);
+        return network.finance.getSummary(params);
+      },
+
+      // Backward compatible
       async listTransactions(params) {
         if (!useNetwork) return stubs.finance.listTransactions(params);
         return network.finance.listTransactions(params);
