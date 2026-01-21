@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Button, Card, Input, Select, useToast } from "../components/ui";
 import { createApiClient } from "../api/client";
+import { makeCacheKey, useDataCache } from "../cache/DataCacheContext";
+import { useCachedQuery } from "../cache/useCachedQuery";
 
 const api = createApiClient();
 
@@ -17,7 +19,7 @@ function validatePhone(phone) {
   const p = String(phone || "").trim();
   if (!p) return ""; // optional
   // Very light validation: allow digits, spaces, (), +, -, .
-  const ok = /^[0-9\s()+\-\.]{7,}$/.test(p);
+  const ok = /^[0-9\s()+\-.]{7,}$/.test(p);
   return ok ? "" : "Enter a valid phone number (or leave blank).";
 }
 
@@ -25,44 +27,44 @@ function validatePhone(phone) {
 export default function StudentForm() {
   /** This is a public page component: create or edit a student with validation and UI states. */
   const toast = useToast();
+  const cache = useDataCache();
+
   const { id } = useParams();
   const isNew = id == null;
   const navigate = useNavigate();
 
-  const [loading, setLoading] = useState(!isNew);
   const [saving, setSaving] = useState(false);
   const [student, setStudent] = useState(emptyStudent);
 
   const [touched, setTouched] = useState({ firstName: false, lastName: false, phone: false });
   const [formError, setFormError] = useState("");
 
-  useEffect(() => {
-    let mounted = true;
+  // Cache key is endpoint+params (detail view)
+  const detailKey = useMemo(() => (isNew ? "" : makeCacheKey("students.get", { id })), [isNew, id]);
 
+  const { data: studentData, loading, error: loadError } = useCachedQuery({
+    key: detailKey,
+    enabled: !isNew && Boolean(id),
+    fetcher: () => api.students.get(id),
+    select: (res) => (res?.ok ? res.data : null),
+    staleTimeMs: 10_000,
+  });
+
+  // Hydrate form values from cached data; enables "instant" navigation back/forth between list and detail.
+  useEffect(() => {
     if (isNew) {
       setStudent(emptyStudent);
-      setLoading(false);
-      return () => {
-        mounted = false;
-      };
+      setFormError("");
+      return;
     }
 
-    (async () => {
-      setLoading(true);
+    if (!loading && studentData) {
+      setStudent(studentData || emptyStudent);
       setFormError("");
-      const res = await api.students.get(id);
-      if (!mounted) return;
-
-      if (res.ok) setStudent(res.data || emptyStudent);
-      else setFormError(res.message || res.error || "Unable to load student.");
-
-      setLoading(false);
-    })();
-
-    return () => {
-      mounted = false;
-    };
-  }, [id, isNew]);
+    } else if (!loading && loadError) {
+      setFormError(loadError || "Unable to load student.");
+    }
+  }, [isNew, loading, studentData, loadError]);
 
   const title = useMemo(() => (isNew ? "Create Student" : "Edit Student"), [isNew]);
 
@@ -125,6 +127,12 @@ export default function StudentForm() {
     }
 
     toast.success(isNew ? "Student created." : "Student updated.");
+
+    // Cache-busting:
+    // - invalidate all student lists (various filters/pagination)
+    // - invalidate this detail entry (edit mode)
+    cache.invalidate("students.list*");
+    if (!isNew) cache.invalidate(makeCacheKey("students.get", { id }));
 
     // Navigate back and tell list to show a one-time flash toast.
     navigate("/students", { replace: true, state: { flash: isNew ? "Student created." : "Student updated." } });

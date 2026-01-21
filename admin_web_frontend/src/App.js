@@ -8,6 +8,7 @@ import AdminLayout from "./layout/AdminLayout";
 import { AuthProvider } from "./auth/AuthContext";
 import ProtectedRoute from "./auth/ProtectedRoute";
 import { ToastProvider } from "./components/ui";
+import { DataCacheProvider } from "./cache/DataCacheContext";
 
 import Dashboard from "./pages/Dashboard";
 import StudentsList from "./pages/StudentsList";
@@ -28,8 +29,9 @@ function App() {
     <ThemeProvider>
       <AuthProvider>
         <ToastProvider>
-          <BrowserRouter>
-            <Routes>
+          <DataCacheProvider>
+            <BrowserRouter>
+              <Routes>
               <Route path="/login" element={<Login />} />
 
               {/* Authenticated area */}
@@ -60,8 +62,9 @@ function App() {
 
               <Route path="/dashboard" element={<Navigate to="/" replace />} />
               <Route path="*" element={<NotFound />} />
-            </Routes>
-          </BrowserRouter>
+              </Routes>
+            </BrowserRouter>
+          </DataCacheProvider>
         </ToastProvider>
       </AuthProvider>
     </ThemeProvider>

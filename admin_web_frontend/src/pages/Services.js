@@ -1,7 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Button, Card, Input, Select, Table, useToast } from "../components/ui";
 import { createApiClient } from "../api/client";
+import { makeCacheKey, useDataCache } from "../cache/DataCacheContext";
+import { useCachedQuery } from "../cache/useCachedQuery";
 
 const api = createApiClient();
 
@@ -38,8 +40,7 @@ export default function Services() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [services, setServices] = useState([]);
-  const [total, setTotal] = useState(0);
+  const cache = useDataCache();
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
@@ -48,54 +49,32 @@ export default function Services() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("All");
 
-  // Data states
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-
   // Prevent late async results from overwriting newer ones
   const requestSeq = useRef(0);
 
-  const totalPages = useMemo(() => Math.max(1, Math.ceil((total || 0) / (pageSize || 10))), [total, pageSize]);
-
-  const fetchServices = useCallback(
-    async (opts = {}) => {
-      const nextPage = Number(opts.page ?? page) || 1;
-      const nextPageSize = Number(opts.pageSize ?? pageSize) || 10;
-      const nextSearch = String(opts.search ?? search);
-      const nextStatus = String(opts.status ?? status);
-
-      const seq = ++requestSeq.current;
-      setLoading(true);
-      setError("");
-
-      const res = await api.services.list({
-        page: nextPage,
-        pageSize: nextPageSize,
-        search: nextSearch,
-        status: nextStatus,
-      });
-
-      if (seq !== requestSeq.current) return;
-
-      if (!res.ok) {
-        setServices([]);
-        setTotal(0);
-        setError(res.message || res.error || "Unable to load services.");
-        setLoading(false);
-        return;
-      }
-
-      const normalized = normalizeServicesList(res.data);
-      setServices(normalized.items);
-      setTotal(normalized.total);
-      setLoading(false);
-    },
+  const queryParams = useMemo(
+    () => ({
+      page,
+      pageSize,
+      search,
+      status,
+    }),
     [page, pageSize, search, status]
   );
 
-  useEffect(() => {
-    fetchServices();
-  }, [fetchServices]);
+  const cacheKey = useMemo(() => makeCacheKey("services.list", queryParams), [queryParams]);
+
+  const { data: listData, loading, error, revalidate } = useCachedQuery({
+    key: cacheKey,
+    fetcher: () => api.services.list(queryParams),
+    select: (res) => (res?.ok ? normalizeServicesList(res.data) : null),
+    staleTimeMs: 5_000,
+  });
+
+  const services = useMemo(() => listData?.items || [], [listData]);
+  const total = useMemo(() => Number(listData?.total || 0), [listData]);
+
+  const totalPages = useMemo(() => Math.max(1, Math.ceil((total || 0) / (pageSize || 10))), [total, pageSize]);
 
   // Flash toast (from create/edit)
   useEffect(() => {
@@ -139,13 +118,18 @@ export default function Services() {
               type="button"
               className="ds-link ds-link--button"
               onClick={async () => {
+                const seq = ++requestSeq.current;
                 const res = await api.services.update(s.id, { active: !Boolean(s.active) });
+                if (seq !== requestSeq.current) return;
+
                 if (!res.ok) {
                   toast.error(res.message || res.error || "Update failed.");
                   return;
                 }
                 toast.success(Boolean(s.active) ? "Service disabled." : "Service enabled.");
-                await fetchServices();
+
+                cache.invalidate("services.list*");
+                await revalidate();
               }}
             >
               {s.active ? "Disable" : "Enable"}
@@ -159,7 +143,10 @@ export default function Services() {
                 const okConfirm = window.confirm(`Delete "${s.name || "this service"}"? This cannot be undone.`);
                 if (!okConfirm) return;
 
+                const seq = ++requestSeq.current;
                 const res = await api.services.remove(s.id);
+                if (seq !== requestSeq.current) return;
+
                 if (!res.ok) {
                   toast.error(res.message || res.error || "Delete failed.");
                   return;
@@ -167,12 +154,14 @@ export default function Services() {
 
                 toast.success("Service deleted.");
 
+                cache.invalidate("services.list*");
+
                 const nextTotal = Math.max(0, total - 1);
                 const nextTotalPages = Math.max(1, Math.ceil(nextTotal / pageSize));
                 const nextPage = Math.min(page, nextTotalPages);
 
                 setPage(nextPage);
-                await fetchServices({ page: nextPage });
+                await revalidate();
               }}
             >
               Delete
@@ -181,7 +170,7 @@ export default function Services() {
         ),
       },
     ],
-    [fetchServices, navigate, page, pageSize, toast, total]
+    [navigate, page, pageSize, toast, total, cache, revalidate, requestSeq]
   );
 
   const subtitle = useMemo(() => {

@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Button, Card, Input, Select, useToast } from "../components/ui";
 import { createApiClient } from "../api/client";
+import { makeCacheKey, useDataCache } from "../cache/DataCacheContext";
+import { useCachedQuery } from "../cache/useCachedQuery";
 
 const api = createApiClient();
 
@@ -27,40 +29,35 @@ export default function InstructorForm() {
   const isNew = id == null;
   const navigate = useNavigate();
 
-  const [loading, setLoading] = useState(!isNew);
+  const cache = useDataCache();
+
   const [saving, setSaving] = useState(false);
   const [instructor, setInstructor] = useState(emptyInstructor);
 
   const [touched, setTouched] = useState({ firstName: false, lastName: false, phone: false });
   const [formError, setFormError] = useState("");
 
-  useEffect(() => {
-    let mounted = true;
+  const detailKey = useMemo(() => (isNew ? "" : makeCacheKey("instructors.get", { id })), [isNew, id]);
+  const { data: instructorData, loading } = useCachedQuery({
+    key: detailKey,
+    enabled: !isNew && Boolean(id),
+    fetcher: () => api.instructors.get(id),
+    select: (res) => (res?.ok ? res.data : null),
+    staleTimeMs: 10_000,
+  });
 
+  useEffect(() => {
     if (isNew) {
       setInstructor(emptyInstructor);
-      setLoading(false);
-      return () => {
-        mounted = false;
-      };
+      setFormError("");
+      return;
     }
 
-    (async () => {
-      setLoading(true);
+    if (!loading && instructorData) {
+      setInstructor(instructorData || emptyInstructor);
       setFormError("");
-      const res = await api.instructors.get(id);
-      if (!mounted) return;
-
-      if (res.ok) setInstructor(res.data || emptyInstructor);
-      else setFormError(res.message || res.error || "Unable to load instructor.");
-
-      setLoading(false);
-    })();
-
-    return () => {
-      mounted = false;
-    };
-  }, [id, isNew]);
+    }
+  }, [isNew, loading, instructorData]);
 
   const title = useMemo(() => (isNew ? "Create Instructor" : "Edit Instructor"), [isNew]);
 
@@ -120,6 +117,11 @@ export default function InstructorForm() {
     }
 
     toast.success(isNew ? "Instructor created." : "Instructor updated.");
+
+    cache.invalidate("instructors.list*");
+    cache.invalidate("instructors.listAssignedStudents*");
+    if (!isNew) cache.invalidate(makeCacheKey("instructors.get", { id }));
+
     navigate("/instructors", { replace: true, state: { flash: isNew ? "Instructor created." : "Instructor updated." } });
   }
 

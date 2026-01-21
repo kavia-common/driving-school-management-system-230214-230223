@@ -1,7 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Button, Card, Input, Select, Table, useToast } from "../components/ui";
 import { createApiClient } from "../api/client";
+import { makeCacheKey, useDataCache } from "../cache/DataCacheContext";
+import { useCachedQuery } from "../cache/useCachedQuery";
 
 const api = createApiClient();
 
@@ -42,10 +44,7 @@ export default function Instructors() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [instructors, setInstructors] = useState([]);
-  const [total, setTotal] = useState(0);
-
-  const [students, setStudents] = useState([]);
+  const cache = useDataCache();
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
@@ -53,92 +52,74 @@ export default function Instructors() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("All");
 
-  const [loading, setLoading] = useState(true);
-  const [studentsLoading, setStudentsLoading] = useState(true);
-  const [error, setError] = useState("");
-
   // Assignment panel
   const [selectedInstructorId, setSelectedInstructorId] = useState("");
-  const [assignedStudents, setAssignedStudents] = useState([]);
-  const [assignmentLoading, setAssignmentLoading] = useState(false);
   const [assignStudentId, setAssignStudentId] = useState("");
 
   // Prevent late async results from overwriting newer ones
   const requestSeq = useRef(0);
 
-  const totalPages = useMemo(() => Math.max(1, Math.ceil((total || 0) / (pageSize || 10))), [total, pageSize]);
-
-  const fetchInstructors = useCallback(
-    async (opts = {}) => {
-      const nextPage = Number(opts.page ?? page) || 1;
-      const nextPageSize = Number(opts.pageSize ?? pageSize) || 10;
-      const nextSearch = String(opts.search ?? search);
-      const nextStatus = String(opts.status ?? status);
-
-      const seq = ++requestSeq.current;
-      setLoading(true);
-      setError("");
-
-      const res = await api.instructors.list({
-        page: nextPage,
-        pageSize: nextPageSize,
-        search: nextSearch,
-        status: nextStatus,
-      });
-
-      if (seq !== requestSeq.current) return;
-
-      if (!res.ok) {
-        setInstructors([]);
-        setTotal(0);
-        setError(res.message || res.error || "Unable to load instructors.");
-        setLoading(false);
-        return;
-      }
-
-      const normalized = normalizeInstructorsList(res.data);
-      setInstructors(normalized.items);
-      setTotal(normalized.total);
-      setLoading(false);
-    },
+  const instructorsParams = useMemo(
+    () => ({
+      page,
+      pageSize,
+      search,
+      status,
+    }),
     [page, pageSize, search, status]
   );
 
-  const fetchStudents = useCallback(async () => {
-    setStudentsLoading(true);
-    const res = await api.students.list({ page: 1, pageSize: 200 });
-    if (res.ok) {
-      // students.list might be {items,...} or array
-      const items = Array.isArray(res.data) ? res.data : Array.isArray(res.data?.items) ? res.data.items : [];
-      setStudents(items);
-    } else {
-      setStudents([]);
-    }
-    setStudentsLoading(false);
-  }, []);
+  const instructorsKey = useMemo(() => makeCacheKey("instructors.list", instructorsParams), [instructorsParams]);
 
-  const fetchAssignments = useCallback(
-    async (instructorId) => {
-      if (!instructorId) {
-        setAssignedStudents([]);
-        return;
-      }
-      setAssignmentLoading(true);
-      const res = await api.instructors.listAssignedStudents(instructorId);
-      if (res.ok) setAssignedStudents(Array.isArray(res.data) ? res.data : []);
-      else setAssignedStudents([]);
-      setAssignmentLoading(false);
+  const {
+    data: instructorsData,
+    loading,
+    error,
+    revalidate: revalidateInstructors,
+  } = useCachedQuery({
+    key: instructorsKey,
+    fetcher: () => api.instructors.list(instructorsParams),
+    select: (res) => (res?.ok ? normalizeInstructorsList(res.data) : null),
+    staleTimeMs: 5_000,
+  });
+
+  const instructors = useMemo(() => instructorsData?.items || [], [instructorsData]);
+  const total = useMemo(() => Number(instructorsData?.total || 0), [instructorsData]);
+
+  const totalPages = useMemo(() => Math.max(1, Math.ceil((total || 0) / (pageSize || 10))), [total, pageSize]);
+
+  const studentsKey = useMemo(() => makeCacheKey("students.list", { page: 1, pageSize: 200 }), []);
+  const {
+    data: studentsData,
+    loading: studentsLoading,
+    revalidate: revalidateStudents,
+  } = useCachedQuery({
+    key: studentsKey,
+    fetcher: () => api.students.list({ page: 1, pageSize: 200 }),
+    select: (res) => {
+      if (!res?.ok) return [];
+      return Array.isArray(res.data) ? res.data : Array.isArray(res.data?.items) ? res.data.items : [];
     },
-    []
+    staleTimeMs: 10_000,
+  });
+  const students = useMemo(() => (Array.isArray(studentsData) ? studentsData : []), [studentsData]);
+
+  const assignmentsKey = useMemo(
+    () => (selectedInstructorId ? makeCacheKey("instructors.listAssignedStudents", { instructorId: selectedInstructorId }) : ""),
+    [selectedInstructorId]
   );
-
-  useEffect(() => {
-    fetchInstructors();
-  }, [fetchInstructors]);
-
-  useEffect(() => {
-    fetchStudents();
-  }, [fetchStudents]);
+  const {
+    data: assignedStudentsData,
+    loading: assignmentLoading,
+    revalidate: revalidateAssignments,
+  } = useCachedQuery({
+    key: assignmentsKey,
+    enabled: Boolean(selectedInstructorId),
+    fetcher: () => api.instructors.listAssignedStudents(selectedInstructorId),
+    select: (res) => (res?.ok && Array.isArray(res.data) ? res.data : []),
+    staleTimeMs: 5_000,
+  });
+  const assignedStudents = useMemo(() => (Array.isArray(assignedStudentsData) ? assignedStudentsData : []), [assignedStudentsData]);
 
   // Flash toast (from create/edit)
   useEffect(() => {
@@ -148,11 +129,6 @@ export default function Instructors() {
       navigate(location.pathname, { replace: true, state: {} });
     }
   }, [location.pathname, location.state, navigate, toast]);
-
-  // Refresh assignments when instructor selection changes
-  useEffect(() => {
-    fetchAssignments(selectedInstructorId);
-  }, [fetchAssignments, selectedInstructorId]);
 
   const selectedInstructor = useMemo(
     () => instructors.find((i) => String(i.id) === String(selectedInstructorId)) || null,
@@ -215,7 +191,10 @@ export default function Instructors() {
                 const okConfirm = window.confirm(`Delete ${instructorName(i)}? This cannot be undone.`);
                 if (!okConfirm) return;
 
+                const seq = ++requestSeq.current;
                 const res = await api.instructors.remove(i.id);
+                if (seq !== requestSeq.current) return;
+
                 if (!res.ok) {
                   toast.error(res.message || res.error || "Delete failed.");
                   return;
@@ -223,10 +202,14 @@ export default function Instructors() {
 
                 toast.success("Instructor deleted.");
 
+                // Bust list + assignment caches so other views refresh.
+                cache.invalidate("instructors.list*");
+                cache.invalidate("instructors.listAssignedStudents*");
+
                 // If deleting currently selected instructor, close panel
                 if (String(selectedInstructorId) === String(i.id)) {
                   setSelectedInstructorId("");
-                  setAssignedStudents([]);
+                  setAssignStudentId("");
                 }
 
                 // If deleting last row on a page, go back a page where possible.
@@ -235,7 +218,7 @@ export default function Instructors() {
                 const nextPage = Math.min(page, nextTotalPages);
 
                 setPage(nextPage);
-                await fetchInstructors({ page: nextPage });
+                await revalidateInstructors();
               }}
               style={{ color: "var(--ocean-error)" }}
             >
@@ -245,7 +228,7 @@ export default function Instructors() {
         ),
       },
     ],
-    [navigate, fetchInstructors, page, pageSize, toast, total, selectedInstructorId]
+    [navigate, page, pageSize, toast, total, selectedInstructorId, cache, revalidateInstructors, requestSeq]
   );
 
   const subtitle = useMemo(() => {
@@ -420,12 +403,10 @@ export default function Instructors() {
                             const okConfirm = window.confirm(`Detach ${s.firstName} ${s.lastName} from ${instructorName(selectedInstructor)}?`);
                             if (!okConfirm) return;
 
-                            setAssignmentLoading(true);
                             const res = await api.instructors.unassignStudent({
                               instructorId: selectedInstructorId,
                               studentId: s.id,
                             });
-                            setAssignmentLoading(false);
 
                             if (!res.ok) {
                               toast.error(res.message || res.error || "Detach failed.");
@@ -433,9 +414,11 @@ export default function Instructors() {
                             }
 
                             toast.success("Student detached.");
-                            await fetchAssignments(selectedInstructorId);
-                            // refresh list to reflect status changes in stub/network
-                            await fetchInstructors();
+
+                            cache.invalidate("instructors.listAssignedStudents*");
+                            cache.invalidate("instructors.list*");
+                            await revalidateAssignments();
+                            await revalidateInstructors();
                           }}
                         >
                           Detach
@@ -473,8 +456,6 @@ export default function Instructors() {
                     onClick={async () => {
                       if (!assignStudentId) return;
 
-                      setAssignmentLoading(true);
-
                       // Prefer new endpoint; fallback to old endpoint if backend only supports it
                       let res = await api.instructors.assignStudent({
                         instructorId: selectedInstructorId,
@@ -488,8 +469,6 @@ export default function Instructors() {
                         });
                       }
 
-                      setAssignmentLoading(false);
-
                       if (!res.ok) {
                         toast.error(res.message || res.error || "Attach failed.");
                         return;
@@ -497,8 +476,12 @@ export default function Instructors() {
 
                       toast.success("Student attached.");
                       setAssignStudentId("");
-                      await fetchAssignments(selectedInstructorId);
-                      await fetchInstructors();
+
+                      cache.invalidate("instructors.listAssignedStudents*");
+                      cache.invalidate("instructors.list*");
+                      await revalidateAssignments();
+                      await revalidateInstructors();
+                      await revalidateStudents(); // keeps dropdown up-to-date in stub mode if needed
                     }}
                   >
                     {assignmentLoading ? "Working…" : "Attach"}
@@ -510,7 +493,6 @@ export default function Instructors() {
                     disabled={assignmentLoading}
                     onClick={() => {
                       setSelectedInstructorId("");
-                      setAssignedStudents([]);
                       setAssignStudentId("");
                     }}
                   >

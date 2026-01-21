@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Button, Card, Input, Select, useToast } from "../components/ui";
 import { createApiClient } from "../api/client";
+import { makeCacheKey, useDataCache } from "../cache/DataCacheContext";
+import { useCachedQuery } from "../cache/useCachedQuery";
 
 const api = createApiClient();
 
@@ -37,52 +39,41 @@ export default function ServiceForm() {
 
   const navigate = useNavigate();
 
-  const [loading, setLoading] = useState(!isNew);
+  const cache = useDataCache();
+
   const [saving, setSaving] = useState(false);
 
   const [service, setService] = useState(emptyService);
   const [touched, setTouched] = useState({ name: false, price: false, lessons: false });
   const [formError, setFormError] = useState("");
 
-  useEffect(() => {
-    let mounted = true;
+  const detailKey = useMemo(() => (isNew ? "" : makeCacheKey("services.get", { id })), [isNew, id]);
+  const { data: serviceData, loading } = useCachedQuery({
+    key: detailKey,
+    enabled: !isNew && Boolean(id),
+    fetcher: () => api.services.get(id),
+    select: (res) => (res?.ok ? res.data : null),
+    staleTimeMs: 10_000,
+  });
 
+  useEffect(() => {
     if (isNew) {
       setService(emptyService);
-      setLoading(false);
-      return () => {
-        mounted = false;
-      };
+      setFormError("");
+      return;
     }
 
-    (async () => {
-      setLoading(true);
-      setFormError("");
-
-      const res = await api.services.get(id);
-      if (!mounted) return;
-
-      if (!res.ok) {
-        setFormError(res.message || res.error || "Unable to load service.");
-        setLoading(false);
-        return;
-      }
-
-      const data = res.data || {};
+    if (!loading && serviceData) {
+      const data = serviceData || {};
       setService({
         name: String(data.name || ""),
         price: data.price == null ? "" : String(data.price),
         lessons: data.lessons == null ? "" : String(data.lessons),
         active: Boolean(data.active),
       });
-
-      setLoading(false);
-    })();
-
-    return () => {
-      mounted = false;
-    };
-  }, [id, isNew]);
+      setFormError("");
+    }
+  }, [isNew, loading, serviceData]);
 
   const title = useMemo(() => (isNew ? "Create Service" : "Edit Service"), [isNew]);
 
@@ -145,6 +136,10 @@ export default function ServiceForm() {
     }
 
     toast.success(isNew ? "Service created." : "Service updated.");
+
+    cache.invalidate("services.list*");
+    if (!isNew) cache.invalidate(makeCacheKey("services.get", { id }));
+
     navigate("/services", { replace: true, state: { flash: isNew ? "Service created." : "Service updated." } });
   }
 

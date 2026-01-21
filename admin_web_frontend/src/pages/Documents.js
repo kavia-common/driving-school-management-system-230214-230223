@@ -1,7 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Card, Input, Select, Table, useToast } from "../components/ui";
 import { createApiClient } from "../api/client";
 import { getRuntimeConfig } from "../config/env";
+import { makeCacheKey, useDataCache } from "../cache/DataCacheContext";
+import { useCachedQuery } from "../cache/useCachedQuery";
 
 const api = createApiClient();
 
@@ -40,8 +42,7 @@ export default function Documents() {
   const cfg = getRuntimeConfig();
   const networkEnabled = Boolean(cfg.useNetwork);
 
-  const [docs, setDocs] = useState([]);
-  const [total, setTotal] = useState(0);
+  const cache = useDataCache();
 
   // list controls
   const [page, setPage] = useState(1);
@@ -53,10 +54,6 @@ export default function Documents() {
   const [type, setType] = useState("All");
   const [search, setSearch] = useState("");
 
-  // Data states
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-
   // Create form (lightweight)
   const [createOpen, setCreateOpen] = useState(false);
   const [newStudentId, setNewStudentId] = useState("");
@@ -67,52 +64,31 @@ export default function Documents() {
 
   const requestSeq = useRef(0);
 
-  const totalPages = useMemo(() => Math.max(1, Math.ceil((total || 0) / (pageSize || 10))), [total, pageSize]);
-
-  const fetchDocs = useCallback(
-    async (opts = {}) => {
-      const nextPage = Number(opts.page ?? page) || 1;
-      const nextPageSize = Number(opts.pageSize ?? pageSize) || 10;
-
-      const nextStudentId = String(opts.studentId ?? studentId).trim();
-      const nextStatus = String(opts.status ?? status).trim();
-      const nextType = String(opts.type ?? type).trim();
-      const nextSearch = String(opts.search ?? search);
-
-      const seq = ++requestSeq.current;
-      setLoading(true);
-      setError("");
-
-      const res = await api.documents.list({
-        page: nextPage,
-        pageSize: nextPageSize,
-        studentId: nextStudentId,
-        status: nextStatus,
-        type: nextType,
-        search: nextSearch,
-      });
-
-      if (seq !== requestSeq.current) return;
-
-      if (!res.ok) {
-        setDocs([]);
-        setTotal(0);
-        setError(res.message || res.error || "Unable to load documents.");
-        setLoading(false);
-        return;
-      }
-
-      const normalized = normalizeDocumentsList(res.data);
-      setDocs(normalized.items);
-      setTotal(normalized.total);
-      setLoading(false);
-    },
+  const queryParams = useMemo(
+    () => ({
+      page,
+      pageSize,
+      studentId: String(studentId || "").trim(),
+      status: String(status || "").trim(),
+      type: String(type || "").trim(),
+      search,
+    }),
     [page, pageSize, studentId, status, type, search]
   );
 
-  useEffect(() => {
-    fetchDocs();
-  }, [fetchDocs]);
+  const cacheKey = useMemo(() => makeCacheKey("documents.list", queryParams), [queryParams]);
+
+  const { data: listData, loading, error, revalidate } = useCachedQuery({
+    key: cacheKey,
+    fetcher: () => api.documents.list(queryParams),
+    select: (res) => (res?.ok ? normalizeDocumentsList(res.data) : null),
+    staleTimeMs: 5_000,
+  });
+
+  const docs = useMemo(() => listData?.items || [], [listData]);
+  const total = useMemo(() => Number(listData?.total || 0), [listData]);
+
+  const totalPages = useMemo(() => Math.max(1, Math.ceil((total || 0) / (pageSize || 10))), [total, pageSize]);
 
   const subtitle = useMemo(() => {
     if (loading) return "Loading…";
@@ -167,7 +143,9 @@ export default function Documents() {
     resetCreate();
     setCreateOpen(false);
     setPage(1);
-    await fetchDocs({ page: 1 });
+
+    cache.invalidate("documents.list*");
+    await revalidate();
   };
 
   const columns = useMemo(
@@ -216,13 +194,19 @@ export default function Documents() {
               value={String(d.status || "")}
               onChange={async (e) => {
                 const next = e.target.value;
+                const seq = ++requestSeq.current;
                 const res = await api.documents.updateStatus(d.id, next);
+                if (seq !== requestSeq.current) return;
+
                 if (!res.ok) {
                   toast.error(res.message || res.error || "Status update failed.");
                   return;
                 }
                 toast.success("Status updated.");
-                await fetchDocs();
+
+                cache.invalidate("documents.list*");
+                cache.invalidate(makeCacheKey("documents.get", { id: d.id }));
+                await revalidate();
               }}
             >
               {["Missing", "Received", "Rejected", "Pending Review"].map((s) => (
@@ -240,7 +224,10 @@ export default function Documents() {
                 const okConfirm = window.confirm(`Delete this document (${d.type || "document"}) for ${d.studentId || "student"}? This cannot be undone.`);
                 if (!okConfirm) return;
 
+                const seq = ++requestSeq.current;
                 const res = await api.documents.remove(d.id);
+                if (seq !== requestSeq.current) return;
+
                 if (!res.ok) {
                   toast.error(res.message || res.error || "Delete failed.");
                   return;
@@ -248,12 +235,15 @@ export default function Documents() {
 
                 toast.success("Document deleted.");
 
+                cache.invalidate("documents.list*");
+                cache.invalidate(makeCacheKey("documents.get", { id: d.id }));
+
                 const nextTotal = Math.max(0, total - 1);
                 const nextTotalPages = Math.max(1, Math.ceil(nextTotal / pageSize));
                 const nextPage = Math.min(page, nextTotalPages);
 
                 setPage(nextPage);
-                await fetchDocs({ page: nextPage });
+                await revalidate();
               }}
             >
               Delete
@@ -262,7 +252,7 @@ export default function Documents() {
         ),
       },
     ],
-    [fetchDocs, page, pageSize, toast, total]
+    [page, pageSize, toast, total, cache, revalidate, requestSeq]
   );
 
   return (

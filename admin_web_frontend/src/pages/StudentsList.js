@@ -1,7 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Button, Card, Input, Select, Table, useToast } from "../components/ui";
 import { createApiClient } from "../api/client";
+import { makeCacheKey, useDataCache } from "../cache/DataCacheContext";
+import { useCachedQuery } from "../cache/useCachedQuery";
 
 const api = createApiClient();
 
@@ -31,8 +33,7 @@ export default function StudentsList() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [students, setStudents] = useState([]);
-  const [total, setTotal] = useState(0);
+  const cache = useDataCache();
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
@@ -41,56 +42,36 @@ export default function StudentsList() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("All");
 
-  // Data states
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-
-  // Prevent late async results from overwriting newer ones
+  // Prevent late async results from overwriting newer ones (still useful for deletes + manual revalidate)
   const requestSeq = useRef(0);
 
-  const totalPages = useMemo(() => Math.max(1, Math.ceil((total || 0) / (pageSize || 10))), [total, pageSize]);
-
-  const fetchStudents = useCallback(
-    async (opts = {}) => {
-      const nextPage = Number(opts.page ?? page) || 1;
-      const nextPageSize = Number(opts.pageSize ?? pageSize) || 10;
-      const nextSearch = String(opts.search ?? search);
-      const nextStatus = String(opts.status ?? status);
-
-      const seq = ++requestSeq.current;
-      setLoading(true);
-      setError("");
-
-      const res = await api.students.list({
-        page: nextPage,
-        pageSize: nextPageSize,
-        search: nextSearch,
-        status: nextStatus,
-      });
-
-      // Ignore stale responses
-      if (seq !== requestSeq.current) return;
-
-      if (!res.ok) {
-        setStudents([]);
-        setTotal(0);
-        setError(res.message || res.error || "Unable to load students.");
-        setLoading(false);
-        return;
-      }
-
-      const normalized = normalizeStudentsList(res.data);
-      setStudents(normalized.items);
-      setTotal(normalized.total);
-      setLoading(false);
-    },
+  const queryParams = useMemo(
+    () => ({
+      page,
+      pageSize,
+      search,
+      status,
+    }),
     [page, pageSize, search, status]
   );
 
-  // Initial load and whenever controls change.
-  useEffect(() => {
-    fetchStudents();
-  }, [fetchStudents]);
+  const cacheKey = useMemo(() => makeCacheKey("students.list", queryParams), [queryParams]);
+
+  const { data: listData, loading, error, revalidate } = useCachedQuery({
+    key: cacheKey,
+    fetcher: () => api.students.list(queryParams),
+    select: (res) => {
+      if (!res?.ok) return null;
+      return normalizeStudentsList(res.data);
+    },
+    // List pages should stay snappy on navigation; revalidate relatively often.
+    staleTimeMs: 5_000,
+  });
+
+  const students = useMemo(() => listData?.items || [], [listData]);
+  const total = useMemo(() => Number(listData?.total || 0), [listData]);
+
+  const totalPages = useMemo(() => Math.max(1, Math.ceil((total || 0) / (pageSize || 10))), [total, pageSize]);
 
   // Show “came from create/edit” message if provided.
   useEffect(() => {
@@ -140,7 +121,10 @@ export default function StudentsList() {
                 const okConfirm = window.confirm(`Delete ${s.firstName} ${s.lastName}? This cannot be undone.`);
                 if (!okConfirm) return;
 
+                const seq = ++requestSeq.current;
                 const res = await api.students.remove(s.id);
+                if (seq !== requestSeq.current) return;
+
                 if (!res.ok) {
                   toast.error(res.message || res.error || "Delete failed.");
                   return;
@@ -148,13 +132,17 @@ export default function StudentsList() {
 
                 toast.success("Student deleted.");
 
+                // Bust cached lists (all variants) so other pages hydrate with fresh data.
+                cache.invalidate("students.list*");
+
                 // If deleting last row on a page, go back a page where possible.
                 const nextTotal = Math.max(0, total - 1);
                 const nextTotalPages = Math.max(1, Math.ceil(nextTotal / pageSize));
                 const nextPage = Math.min(page, nextTotalPages);
 
                 setPage(nextPage);
-                await fetchStudents({ page: nextPage });
+                // Revalidate current list (SWR keeps UI stable while refreshing)
+                await revalidate();
               }}
               style={{ color: "var(--ocean-error)" }}
             >
@@ -164,7 +152,7 @@ export default function StudentsList() {
         ),
       },
     ],
-    [navigate, fetchStudents, page, pageSize, toast, total]
+    [navigate, page, pageSize, toast, total, cache, revalidate]
   );
 
   const subtitle = useMemo(() => {

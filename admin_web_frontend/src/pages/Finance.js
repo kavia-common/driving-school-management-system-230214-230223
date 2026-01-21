@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Card, Input, Select, Table, useToast } from "../components/ui";
 import { createApiClient } from "../api/client";
+import { makeCacheKey, useDataCache } from "../cache/DataCacheContext";
+import { useCachedQuery } from "../cache/useCachedQuery";
 
 const api = createApiClient();
 
@@ -36,16 +38,7 @@ export default function Finance() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
 
-  // Data/state
-  const [loading, setLoading] = useState(true);
-  const [summaryLoading, setSummaryLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [rows, setRows] = useState([]);
-  const [total, setTotal] = useState(0);
-
-  const [summary, setSummary] = useState({ totalRevenue: 0, pending: 0, refunds: 0 });
-
-  const totalPages = useMemo(() => Math.max(1, Math.ceil(Number(total || 0) / Number(pageSize || 10))), [total, pageSize]);
+  const cache = useDataCache();
 
   const queryParams = useMemo(
     () => ({
@@ -64,28 +57,29 @@ export default function Finance() {
     [page, pageSize, sort, order, search, from, to, type, status]
   );
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError("");
+  // List cache key includes pagination/sort (endpoint+params).
+  const listKey = useMemo(() => makeCacheKey("finance.list", queryParams), [queryParams]);
 
-    const res = await api.finance.list(queryParams);
-    if (!res.ok) {
-      setRows([]);
-      setTotal(0);
-      setError(res.message || "Failed to load transactions.");
-      setLoading(false);
-      return;
-    }
+  const {
+    data: listData,
+    loading,
+    error,
+    revalidate: load,
+  } = useCachedQuery({
+    key: listKey,
+    fetcher: () => api.finance.list(queryParams),
+    select: (res) => (res?.ok ? res.data : null),
+    staleTimeMs: 5_000,
+  });
 
-    const data = res.data || {};
-    setRows(Array.isArray(data.items) ? data.items : []);
-    setTotal(Number(data.total || 0));
-    setLoading(false);
-  }, [queryParams]);
+  const rows = useMemo(() => (Array.isArray(listData?.items) ? listData.items : []), [listData]);
+  const total = useMemo(() => Number(listData?.total || 0), [listData]);
 
-  const loadSummary = useCallback(async () => {
-    setSummaryLoading(true);
-    const res = await api.finance.getSummary({
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(Number(total || 0) / Number(pageSize || 10))), [total, pageSize]);
+
+  // Summary ignores pagination, but respects filters/search.
+  const summaryParams = useMemo(
+    () => ({
       q: search,
       filters: {
         from,
@@ -93,45 +87,40 @@ export default function Finance() {
         type: type === "All" ? "" : type,
         status: status === "All" ? "" : status,
       },
-    });
+    }),
+    [search, from, to, type, status]
+  );
 
-    if (res.ok) {
-      setSummary({
-        totalRevenue: Number(res.data?.totalRevenue || 0),
-        pending: Number(res.data?.pending || 0),
-        refunds: Number(res.data?.refunds || 0),
-      });
-    } else {
-      // Non-blocking: keep page usable even if summary endpoint is missing in backend
-      setSummary({ totalRevenue: 0, pending: 0, refunds: 0 });
-    }
+  const summaryKey = useMemo(() => makeCacheKey("finance.getSummary", summaryParams), [summaryParams]);
 
-    setSummaryLoading(false);
-  }, [search, from, to, type, status]);
+  const {
+    data: summaryData,
+    loading: summaryLoading,
+    revalidate: loadSummary,
+  } = useCachedQuery({
+    key: summaryKey,
+    fetcher: () => api.finance.getSummary(summaryParams),
+    select: (res) =>
+      res?.ok
+        ? {
+            totalRevenue: Number(res.data?.totalRevenue || 0),
+            pending: Number(res.data?.pending || 0),
+            refunds: Number(res.data?.refunds || 0),
+          }
+        : // Non-blocking fallback (missing backend endpoint)
+          { totalRevenue: 0, pending: 0, refunds: 0 },
+    staleTimeMs: 10_000,
+  });
 
-  // Reload transactions when server-driven controls change
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      if (!mounted) return;
-      await load();
-    })();
-    return () => {
-      mounted = false;
-    };
-  }, [load]);
-
-  // Reload KPI summary when filters/search change (not pagination)
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      if (!mounted) return;
-      await loadSummary();
-    })();
-    return () => {
-      mounted = false;
-    };
-  }, [loadSummary]);
+  const summary = useMemo(
+    () =>
+      summaryData || {
+        totalRevenue: 0,
+        pending: 0,
+        refunds: 0,
+      },
+    [summaryData]
+  );
 
   // Reset to first page on filter/sort changes
   useEffect(() => {
@@ -193,6 +182,9 @@ export default function Finance() {
                   return;
                 }
                 toast.success("Transaction deleted.");
+
+                cache.invalidate("finance.list*");
+                cache.invalidate("finance.getSummary*");
                 await load();
                 await loadSummary();
               }}
@@ -241,6 +233,9 @@ export default function Finance() {
                 return;
               }
               toast.success("Transaction created.");
+
+              cache.invalidate("finance.list*");
+              cache.invalidate("finance.getSummary*");
               await load();
               await loadSummary();
             }}
